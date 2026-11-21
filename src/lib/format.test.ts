@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { decodeClip, encodeClip, FRAME_BYTES, type FlipperClip } from './format'
+import { encodeAdpcm } from './pcm'
 
 function fixture(): FlipperClip {
   const white = new Uint8Array(FRAME_BYTES).fill(255)
@@ -50,6 +51,28 @@ describe('FZMV v1 codec', () => {
     const frames = Array.from({ length: 241 }, (_, i) =>
       new Uint8Array(FRAME_BYTES).fill(i % 3 === 0 ? 0xff : i % 3 === 1 ? 0x55 : 0xaa))
     const source: FlipperClip = { frames, fps: 60, durationMs: 4017, audio: [] }
+    expect(decodeClip(encodeClip(source))).toEqual(source)
+  })
+})
+
+describe('FZMV v3 playback modes', () => {
+  it('round-trips the retro and tracker modes', () => {
+    for (const mode of ['video-8bit', 'tracker'] as const) {
+      const source = { ...fixture(), mode }
+      const file = encodeClip(source)
+      expect(new DataView(file.buffer).getUint16(4, true)).toBe(3)
+      expect(decodeClip(file)).toEqual(source)
+    }
+  })
+
+  it('keeps silent high-fidelity video playable', () => {
+    const source: FlipperClip = { ...fixture(), mode: 'video-hifi', audio: [] }
+    expect(decodeClip(encodeClip(source))).toEqual(source)
+  })
+
+  it('round-trips high-fidelity audio without misreading the mode byte as codec data', () => {
+    const samples = Int16Array.from({ length: 700 }, (_, i) => Math.round(8000 * Math.sin(i / 8)))
+    const source: FlipperClip = { ...fixture(), mode: 'video-hifi', audio: [], pcm: encodeAdpcm(samples) }
     expect(decodeClip(encodeClip(source))).toEqual(source)
   })
 })

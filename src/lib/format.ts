@@ -6,6 +6,7 @@ export const FRAME_BYTES = WIDTH * HEIGHT / 8
 export const AUDIO_TICK_MS = 20
 export type BuzzerTick = { frequency: number; gain: number; gate: number }
 export type FlipperClip = {
+  mode?: 'video-hifi' | 'video-8bit' | 'tracker'
   fps: number
   durationMs: number
   frames: Uint8Array[]
@@ -97,7 +98,7 @@ export function encodeClip(clip: FlipperClip): Uint8Array {
   const file = new Uint8Array(audioOffset + audioBytes)
   const view = new DataView(file.buffer)
   file.set([0x46, 0x5a, 0x4d, 0x56]) // FZMV
-  view.setUint16(4, clip.pcm ? 2 : 1, true)
+  view.setUint16(4, clip.mode ? 3 : clip.pcm ? 2 : 1, true)
   view.setUint16(6, 64, true)
   view.setUint16(8, WIDTH, true)
   view.setUint16(10, HEIGHT, true)
@@ -118,6 +119,7 @@ export function encodeClip(clip: FlipperClip): Uint8Array {
     view.setUint16(58, PCM_BLOCK_SAMPLES, true)
     view.setUint16(60, PCM_BLOCK_BYTES, true)
   }
+  if (clip.mode) view.setUint8(62, { 'video-hifi': 0, 'video-8bit': 1, tracker: 2 }[clip.mode])
   let position = frameDataOffset
   records.forEach((record, i) => {
     view.setUint32(frameIndexOffset + i * 4, position, true)
@@ -138,9 +140,9 @@ export function decodeClip(bytes: Uint8Array): FlipperClip {
   if (bytes.length < 64 || String.fromCharCode(...bytes.subarray(0, 4)) !== 'FZMV') throw new Error('FZMV形式ではありません')
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const version = view.getUint16(4, true)
-  if ((version !== 1 && version !== 2) || view.getUint16(6, true) !== 64 ||
+  if ((version !== 1 && version !== 2 && version !== 3) || view.getUint16(6, true) !== 64 ||
     view.getUint16(8, true) !== WIDTH || view.getUint16(10, true) !== HEIGHT ||
-    view.getUint16(14, true) !== (version === 2 ? 0 : AUDIO_TICK_MS) || view.getUint32(44, true) !== bytes.length) {
+    view.getUint16(14, true) !== (version === 2 || (version === 3 && view.getUint32(40, true) === 2) ? 0 : AUDIO_TICK_MS) || view.getUint32(44, true) !== bytes.length) {
     throw new Error('非対応のFZMVバージョンまたはヘッダーです')
   }
   const fps = view.getUint16(12, true)
@@ -151,16 +153,18 @@ export function decodeClip(bytes: Uint8Array): FlipperClip {
   const audioOffset = view.getUint32(32, true)
   const durationMs = view.getUint32(36, true)
   const flags = view.getUint32(40, true)
-  const isPcm = version === 2 && flags === 2
+  const isPcm = version >= 2 && flags === 2
+  const mode = version === 3 ? (['video-hifi', 'video-8bit', 'tracker'] as const)[bytes[62]] : undefined
   if (fps === 0 || fps > 60 || frameCount === 0 || indexOffset < 64 || dataOffset < indexOffset + frameCount * 4 ||
     audioOffset < dataOffset || (!isPcm && audioOffset + audioCount * 4 !== bytes.length) ||
-    (version === 2 && (!isPcm || audioCount !== 0)) || (version === 1 && flags !== (audioCount ? 1 : 0))) {
+    (version === 2 && (!isPcm || audioCount !== 0)) || (version === 1 && flags !== (audioCount ? 1 : 0)) ||
+    (version === 3 && (!mode || (mode !== 'video-hifi' && isPcm) || (mode === 'video-hifi' && audioCount !== 0) || (isPcm && audioCount !== 0) || (!isPcm && flags !== (audioCount ? 1 : 0))))) {
     throw new Error('FZMVのオフセットが不正です')
   }
   let pcm: PcmAudio | undefined
   if (isPcm) {
     if (view.getUint16(56, true) !== 1 || view.getUint16(58, true) !== PCM_BLOCK_SAMPLES ||
-      view.getUint16(60, true) !== PCM_BLOCK_BYTES || view.getUint16(62, true) !== 0) {
+      view.getUint16(60, true) !== PCM_BLOCK_BYTES || (version === 2 && view.getUint16(62, true) !== 0)) {
       throw new Error('未対応のPCMコーデックです')
     }
     pcm = {
@@ -193,7 +197,7 @@ export function decodeClip(bytes: Uint8Array): FlipperClip {
     const offset = audioOffset + i * 4
     audio.push({ frequency: view.getUint16(offset, true), gain: bytes[offset + 2], gate: bytes[offset + 3] })
   }
-  return { fps, durationMs, frames, audio, ...(pcm ? { pcm } : {}) }
+  return { fps, durationMs, frames, audio, ...(pcm ? { pcm } : {}), ...(mode ? { mode } : {}) }
 }
 
 export function frameToImageData(frame: Uint8Array, data: ImageData, light: [number, number, number] = [25, 51, 46], dark: [number, number, number] = [167, 190, 158]) {

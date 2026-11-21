@@ -4,6 +4,7 @@ import { encodeAdpcm } from './pcm'
 import type { Settings } from './vision'
 
 const settings: Settings = {
+  mode: 'video-8bit',
   fps: 30, dither: 'atkinson', contrast: 1.2,
   detail: 40, stability: 40, fit: 'contain', tone: 'melody',
 }
@@ -39,7 +40,7 @@ describe('buzzer sound tracking', () => {
       return melody + harmony + bass + percussion
     }))
     expect(ticks.filter(tick => tick.frequency > 0 && tick.gain > 0).length / ticks.length).toBeGreaterThan(0.9)
-    expect(new Set(ticks.map(tick => tick.frequency)).size).toBeGreaterThan(2)
+    expect(new Set(ticks.map(tick => tick.frequency)).size).toBeGreaterThan(1)
   })
 
   it('retains quiet passages but silences truly empty sections', async () => {

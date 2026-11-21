@@ -102,8 +102,8 @@ export async function trackBuzzer(buffer: AudioBuffer, seconds: number, settings
       if (bin * 2 < magnitudes.length) score += magnitudes[bin * 2] * 0.62
       if (bin * 3 < magnitudes.length) score += magnitudes[bin * 3] * 0.31
       // Prefer fundamentals in the strongest part of a melody/voice spectrum.
-      const centerPreference = settings.tone === 'voice' ? 460 : 370
-      score *= 1 / (1 + Math.abs(Math.log2(frequency / centerPreference)) * 0.22)
+      const centerPreference = settings.tone === 'voice' ? 460 : 600
+      score *= 1 / (1 + Math.abs(Math.log2(frequency / centerPreference)) * (settings.tone === 'voice' ? 0.3 : 0.95))
       if (previousPitch > 0) {
         const semitones = Math.abs(12 * Math.log2(frequency / previousPitch))
         score *= 1 / (1 + Math.min(12, semitones) * 0.018)
@@ -146,7 +146,10 @@ export async function trackBuzzer(buffer: AudioBuffer, seconds: number, settings
         ? smoothPitch * 0.4 + stablePitch * 0.6 : stablePitch
     }
     return {
-      frequency: smoothGain < 9 || !active ? 0 : Math.max(100, Math.min(2500, Math.round(smoothPitch))),
+      frequency: smoothGain < 9 || !active ? 0 : Math.max(100, Math.min(2500, Math.round(
+        settings.mode === 'video-8bit' || settings.mode === 'tracker'
+          ? 440 * Math.pow(2, Math.round(12 * Math.log2(Math.max(100, smoothPitch) / 440)) / 12)
+          : smoothPitch))),
       gain: active ? Math.round(smoothGain) : 0,
       gate: active ? 100 : 0,
     }

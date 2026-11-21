@@ -24,6 +24,9 @@ typedef struct {
     uint32_t position_ms;
     uint32_t duration_ms;
     uint8_t volume;
+    bool tracker;
+    uint16_t frequency;
+    uint8_t gain;
     bool paused;
     bool loaded;
     const char* error;
@@ -41,9 +44,42 @@ static void player_draw(Canvas* canvas, void* context) {
         canvas_draw_str(canvas, 4, 58, "Back: exit");
         return;
     }
-    furi_mutex_acquire(ui->draw_mutex, FuriWaitForever);
-    memcpy(canvas_get_buffer(canvas), ui->display, FZMV_FRAME_BYTES);
-    furi_mutex_release(ui->draw_mutex);
+    if(ui->tracker) {
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str(canvas, 5, 9, "FZMV / TRACKER");
+        canvas_draw_line(canvas, 5, 13, 123, 13);
+        char frequency[32];
+        snprintf(frequency, sizeof(frequency), "%u Hz", ui->frequency);
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 5, 30, ui->frequency ? frequency : "REST");
+        const uint16_t hz = ui->frequency;
+        /* Semitone bins are used for an inexpensive note display on-device. */
+        static const uint16_t notes[] = {262,277,294,311,330,349,370,392,415,440,466,494};
+        static const char* names[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+        if(hz) {
+            uint32_t normalized = hz;
+            int octave = 4;
+            while(normalized >= 524 && octave < 8) { normalized = (normalized + 1) / 2; octave++; }
+            while(normalized < 262 && octave > 0) { normalized *= 2; octave--; }
+            int nearest = 0;
+            uint32_t delta = UINT32_MAX;
+            for(int n = 0; n < 12; n++) {
+                uint32_t diff = normalized > notes[n] ? normalized - notes[n] : notes[n] - normalized;
+                if(diff < delta) { delta = diff; nearest = n; }
+            }
+            char label[14];
+            snprintf(label, sizeof(label), "%s%d", names[nearest], octave);
+            canvas_draw_str(canvas, 91, 30, label);
+        }
+        canvas_draw_frame(canvas, 5, 39, 118, 9);
+        canvas_draw_box(canvas, 6, 40, (uint8_t)((uint32_t)ui->gain * 116 / 255), 7);
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str(canvas, 5, 62, ui->paused ? "OK Play  Long Down: View" : "8BIT / MONO");
+    } else {
+        furi_mutex_acquire(ui->draw_mutex, FuriWaitForever);
+        memcpy(canvas_get_buffer(canvas), ui->display, FZMV_FRAME_BYTES);
+        furi_mutex_release(ui->draw_mutex);
+    }
     if(ui->paused) {
         canvas_set_color(canvas, ColorWhite);
         canvas_draw_box(canvas, 0, 42, 128, 22);
@@ -54,7 +90,7 @@ static void player_draw(Canvas* canvas, void* context) {
                  (unsigned long)(ui->position_ms / 1000u),
                  (unsigned long)(ui->duration_ms / 1000u), ui->volume);
         canvas_draw_str(canvas, 2, 51, status);
-        canvas_draw_str(canvas, 2, 62, ui->rename_status ? ui->rename_status : "Hold OK: Rename");
+        canvas_draw_str(canvas, 2, 62, ui->rename_status ? ui->rename_status : "Long Down: View  OK: Rename");
     }
 }
 
@@ -225,14 +261,15 @@ int32_t fzmv_player_app(void* arg) {
     opened = true;
     if(!fzmv_open(file, &info, &ui->error)) goto done;
     ui->duration_ms = info.duration_ms;
+    ui->tracker = info.playback_mode == 2;
     ui->loaded = true;
-    if(!player_frame(file, &info, ui, 0)) goto done;
+    if(!ui->tracker && !player_frame(file, &info, ui, 0)) goto done;
 
     uint32_t anchor_ms = 0;
     uint32_t anchor_tick = furi_get_tick();
     const uint32_t ticks_per_second = furi_kernel_get_tick_frequency();
     bool use_audio_clock = false;
-    if(info.version == 2) {
+    if(info.pcm_audio) {
         use_audio_clock = audio_pwm_start(audio, file, &info, 0, ui->volume, ui->events);
     } else if(info.tick_count) {
         tone_acquired = furi_hal_speaker_acquire(100);
@@ -242,6 +279,13 @@ int32_t fzmv_player_app(void* arg) {
     while(running) {
         uint8_t event = 0;
         const FuriStatus received = furi_message_queue_get(ui->events, &event, 8);
+        if(received == FuriStatusOk && event == (0x40u | InputKeyDown) &&
+           !info.pcm_audio) {
+            ui->tracker = !ui->tracker;
+            if(!ui->tracker) player_frame(file, &info, ui, ui->position_ms);
+            view_port_update(ui->viewport);
+            continue;
+        }
         if(received == FuriStatusOk && event == (0x40u | InputKeyOk)) {
             if(use_audio_clock) {
                 audio_pwm_stop(audio);
@@ -282,10 +326,10 @@ int32_t fzmv_player_app(void* arg) {
                         anchor_ms = 0;
                         ui->position_ms = 0;
                         previous_tick = UINT32_MAX;
-                        player_frame(file, &info, ui, 0);
+                        if(!ui->tracker) player_frame(file, &info, ui, 0);
                     }
                     anchor_tick = furi_get_tick();
-                    if(info.version == 2) {
+                    if(info.pcm_audio) {
                         use_audio_clock = audio_pwm_start(audio, file, &info,
                             (uint32_t)((uint64_t)anchor_ms * FZMV_PCM_RATE / 1000u),
                             ui->volume, ui->events);
@@ -297,18 +341,18 @@ int32_t fzmv_player_app(void* arg) {
                 anchor_ms = clamp_seek(ui->position_ms, info.duration_ms, key == InputKeyRight);
                 anchor_tick = furi_get_tick();
                 ui->position_ms = anchor_ms;
-                if(info.version == 2 && use_audio_clock && !ui->paused) {
+                if(info.pcm_audio && use_audio_clock && !ui->paused) {
                     audio_pwm_stop(audio);
                     use_audio_clock = audio_pwm_start(audio, file, &info,
                         (uint32_t)((uint64_t)anchor_ms * FZMV_PCM_RATE / 1000u),
                         ui->volume, ui->events);
                 }
-                if(info.version == 1 && tone_active) {
+                if(!info.pcm_audio && tone_active) {
                     furi_hal_speaker_stop();
                     tone_active = false;
                 }
                 previous_tick = UINT32_MAX;
-                player_frame(file, &info, ui, anchor_ms);
+                if(!ui->tracker) player_frame(file, &info, ui, anchor_ms);
             } else if(key == InputKeyUp || key == InputKeyDown) {
                 ui->volume = (uint8_t)(key == InputKeyUp ? MIN(100u, ui->volume + 10u) :
                                                        (ui->volume >= 10u ? ui->volume - 10u : 0u));
@@ -338,10 +382,20 @@ int32_t fzmv_player_app(void* arg) {
             view_port_update(ui->viewport);
             continue;
         }
-        if(info.version == 1 && tone_acquired) {
+        if(!info.pcm_audio && tone_acquired) {
             player_tone(file, &info, ui->position_ms, ui->volume, &tone_active, &previous_tick);
         }
-        if(!player_frame(file, &info, ui, ui->position_ms)) break;
+        if(ui->tracker) {
+            FzmvTone current = {0};
+            if(fzmv_read_tone(file, &info, ui->position_ms / 20u, &current)) {
+                ui->frequency = current.frequency;
+                ui->gain = current.gain;
+            } else {
+                ui->frequency = 0;
+                ui->gain = 0;
+            }
+            view_port_update(ui->viewport);
+        } else if(!player_frame(file, &info, ui, ui->position_ms)) break;
     }
 
 done:

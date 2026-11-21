@@ -2,6 +2,7 @@ import { FRAME_BYTES, HEIGHT, WIDTH } from './format'
 
 export type Dither = 'bayer' | 'floyd' | 'atkinson'
 export type Settings = {
+  mode: 'video-hifi' | 'video-8bit' | 'tracker'
   fps: number
   dither: Dither
   contrast: number

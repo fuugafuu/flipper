@@ -3,6 +3,7 @@ import { HEIGHT, WIDTH } from './format'
 import { convertImage, type Settings, type ToneState } from './vision'
 
 const settings: Settings = {
+  mode: 'video-8bit',
   fps: 60, dither: 'bayer', contrast: 1, detail: 0,
   stability: 0, fit: 'contain', tone: 'melody',
 }

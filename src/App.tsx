@@ -12,6 +12,7 @@ import { pcmWaveform, type PcmAudio } from './lib/pcm'
 import type { Settings } from './lib/vision'
 
 const initialSettings: Settings = {
+  mode: 'video-hifi',
   fps: 10, dither: 'atkinson', contrast: 1.2,
   detail: 40, stability: 40, fit: 'contain', tone: 'pcm',
 }
@@ -115,6 +116,24 @@ export default function App() {
     const index = Math.max(0, Math.min(clip.frames.length - 1, Math.floor(seconds * clip.fps + 0.000001)))
     const pixels = context.createImageData(128, 64)
     context.putImageData(frameToImageData(clip.frames[index], pixels), 0, 0)
+    if (clip.mode === 'tracker') {
+      const tone = clip.audio[Math.min(clip.audio.length - 1, Math.floor(seconds * 50))]
+      const frequency = tone?.frequency ?? 0
+      const noteNumber = frequency ? Math.round(69 + 12 * Math.log2(frequency / 440)) : -1
+      const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+      const label = noteNumber < 0 ? '--' : `${names[(noteNumber % 12 + 12) % 12]}${Math.floor(noteNumber / 12) - 1}`
+      context.fillStyle = '#19332e'
+      context.font = 'bold 11px monospace'
+      context.fillText('BUZZER / TRACKER', 5, 13)
+      context.font = 'bold 21px monospace'
+      context.fillText(label, 7, 39)
+      context.font = '10px monospace'
+      context.fillText(frequency ? `${frequency}Hz` : 'REST', 59, 36)
+      context.fillRect(6, 45, Math.round((tone?.gain ?? 0) / 255 * 116), 6)
+      context.strokeRect(5, 44, 118, 8)
+      context.font = '8px monospace'
+      context.fillText('8BIT MONO / LIVE PITCH', 5, 61)
+    }
   }, [clip])
 
   useEffect(() => {
@@ -318,13 +337,24 @@ export default function App() {
               {file ? <><div className="drop-icon selected">{imported ? <HardDrive size={24} /> : isVideo ? <FileVideo2 size={24} /> : <FileAudio2 size={24} />}</div><strong className="file-name">{file.name}</strong><span className="drop-secondary">{niceBytes(file.size)} <span className="dot-separator">·</span> クリックして変更</span><span className="file-indicator"><Check size={12} /> {imported ? '変換済みファイルを選択済み' : 'ファイル選択済み'}</span></> : <><div className="drop-icon"><UploadCloud size={27} strokeWidth={1.6} /></div><strong>ファイルをドロップ</strong><span className="drop-secondary">またはクリックしてファイルを選択</span><span className="file-types">MP4 / MOV / WEBM / MP3 / WAV / FZMV</span></>}
             </button>
             <button className="import-fzmv-button" type="button" onClick={() => fzmvInput.current?.click()}><HardDrive size={17} /> 変換済み .fzmv を開いて再生</button>
-            <div className="upload-footnote"><Info size={14} /> {imported ? 'FZMV v1／v2に対応。読み込んだ映像と音声を変換後プレビューで再生できます。' : '最後まで変換します。長い動画や高FPSは端末のメモリと処理時間が必要です。'}</div>
+            <div className="upload-footnote"><Info size={14} /> {imported ? 'FZMV v1／v2／v3に対応。読み込んだ映像と音声を変換後プレビューで再生できます。' : '最後まで変換します。長い動画や高FPSは端末のメモリと処理時間が必要です。'}</div>
           </section>
 
           <section className="panel settings-panel">
             <div className="panel-heading"><div className="panel-heading-left"><span className="step-label">02</span><h3>変換パラメータ</h3></div><SlidersHorizontal size={17} className="dim-icon" /></div>
             {imported ? <div className="imported-settings-note"><Check size={20} /><div><strong>{clip ? 'FZMVの読み込みが完了しました' : error ? 'FZMVの読み込みに失敗しました' : 'FZMVを読み込み中です'}</strong><p>{error || (clip ? '右側のプレビューで映像と音声を再生できます。ブザー推定音も試聴できます。' : '読み込みが終わるとプレビューに表示されます。')}</p></div></div> : <>
             <div className="settings-group-label"><Film size={15} /> VIDEO <span>映像設定</span></div>
+            <div className="mode-choices" role="group" aria-label="生成モード">
+              {([
+                ['video-hifi', 'CINEMA', '動画＋高音質', '16kHz ADPCMで音楽や声を再生'],
+                ['video-8bit', 'RETRO', '動画＋8bit風', 'ファミコン風の単音ブザー'],
+                ['tracker', 'TRACKER', '音声＋音程表示', 'ゲームボーイ風の音程モニター'],
+              ] as const).map(([mode, tag, title, caption]) =>
+                <button type="button" key={mode} className={`mode-choice ${settings.mode === mode ? 'active' : ''}`}
+                  aria-pressed={settings.mode === mode} onClick={() => updateSettings('mode', mode)}>
+                  <small>{tag}</small><strong>{title}</strong><span>{caption}</span>
+                </button>)}
+            </div>
             <div className="settings-selects">
               <ControlSelect label="フレームレート" value={settings.fps} choices={[6, 8, 10, 12, 15, 20, 24, 30, 40, 48, 60].map(value => ({ value, label: `${value} FPS` }))} onChange={value => updateSettings('fps', Number(value))} />
               <div className="full-duration-note"><Clock3 size={14} /> ファイルの最後まで変換します</div>
@@ -337,8 +367,8 @@ export default function App() {
               <QualitySlider label="ちらつき抑制" value={settings.stability} display={`${settings.stability}%`} min={0} max={100} onChange={value => updateSettings('stability', value)} hint="連続フレームの表示を安定化" />
             </div>
             <div className="settings-group-label audio-group"><AudioLines size={15} /> AUDIO <span>ブザー設定</span></div>
-            <ControlSelect label="音声変換方式" value={settings.tone} choices={[{ value: 'pcm', label: '高音質 · 音楽・声（推奨）' }, { value: 'melody', label: '単音ブザー · メロディー' }, { value: 'voice', label: '単音ブザー · 声の帯域' }]} onChange={value => updateSettings('tone', value as Settings['tone'])} />
-            <div className="audio-hint"><Waves size={15} /><span>{settings.tone === 'pcm' ? '16kHzの音声波形を補正し、4bit IMA ADPCMで圧縮。楽器・声・リズムを保持します。実機PWM再生は次段階で検証します。' : '音楽を20msごとに単音化します。複数楽器や歌声は音程が飛びやすく、大幅に音質が低下します。'}</span></div>
+            {settings.mode !== 'video-hifi' && <ControlSelect label="音程解析" value={settings.tone} choices={[{ value: 'melody', label: 'メロディー優先' }, { value: 'voice', label: 'ボーカル優先' }]} onChange={value => updateSettings('tone', value as Settings['tone'])} />}
+            <div className="audio-hint"><Waves size={15} /><span>{settings.mode === 'video-hifi' ? '音声波形を16kHz 4bit IMA ADPCMで保存します。実機ブザーの帯域・音量による制約があります。' : '音声を20msごとに解析し、12平均律に補正した矩形波の音程を記録します。同時に鳴る楽器は単音に集約されます。'}</span></div>
             {working && <div className="progress-area" role="status"><div className="progress-head"><span>{status}</span><strong>{Math.round(progress * 100)}%</strong></div><div className="progress-track"><div style={{ width: `${progress * 100}%` }} /></div></div>}
             {error && <div className="error-box" role="alert"><CircleAlert size={16} />{error}</div>}
             <button className={`convert-button ${working ? 'converting' : ''}`} onClick={() => { if (working) abortController.current?.abort(); else void convert() }} disabled={imported || (!file && !working)}>
@@ -392,11 +422,11 @@ export default function App() {
             <button className="download-button" disabled={!clip} onClick={save}><ArrowDownToLine size={18} /> ダウンロード</button>
           </div>
           {result?.warnings.map((warning, i) => <div className="notice notice-warn" key={i}><CircleAlert size={16} /> {warning}</div>)}
-          <div className="spec-grid"><div className="spec"><span className="spec-icon"><MonitorPlay size={18} /></span><span>DISPLAY</span><strong>128 × 64</strong><small>MONOCHROME LCD</small></div><div className="spec"><span className="spec-icon"><Activity size={18} /></span><span>AUDIO</span><strong>{(imported && clip ? Boolean(clip.pcm) : settings.tone === 'pcm') ? '16k' : '100–2500'} <i>Hz</i></strong><small>{(imported && clip ? Boolean(clip.pcm) : settings.tone === 'pcm') ? '4-BIT IMA ADPCM' : 'SINGLE TONE'}</small></div><div className="spec"><span className="spec-icon"><Clock3 size={18} /></span><span>FRAME RATE</span><strong>{imported && clip ? clip.fps : settings.fps} <i>FPS</i></strong><small>{imported && clip ? 'IMPORTED FILE' : 'CONFIGURABLE'}</small></div></div>
+            <div className="spec-grid"><div className="spec"><span className="spec-icon"><MonitorPlay size={18} /></span><span>DISPLAY</span><strong>128 × 64</strong><small>MONOCHROME LCD</small></div><div className="spec"><span className="spec-icon"><Activity size={18} /></span><span>AUDIO</span><strong>{(clip ? Boolean(clip.pcm) : settings.mode === 'video-hifi') ? '16k' : '100–2500'} <i>Hz</i></strong><small>{(clip ? Boolean(clip.pcm) : settings.mode === 'video-hifi') ? '4-BIT IMA ADPCM' : 'SINGLE TONE'}</small></div><div className="spec"><span className="spec-icon"><Clock3 size={18} /></span><span>FRAME RATE</span><strong>{clip ? clip.fps : settings.mode === 'tracker' ? 1 : settings.fps} <i>FPS</i></strong><small>{imported && clip ? 'IMPORTED FILE' : 'CONFIGURABLE'}</small></div></div>
         </section>
       </div>
 
-      <div className="bottom-info"><span className="info-icon"><Sparkles size={19} /></span><div><strong>実機再生の検証状況</strong><p>高音質モードはFZMV v2（16kHz・4bit ADPCM音声）を生成します。既存の単音モードはv1形式です。専用のFZMV Playerアプリを開発しています。音声プレビューの「ブザー推定音」は周波数帯域などを仮定した試聴用の音で、実機音響特性に基づく校正はしていません。実機の音質・音量や60 FPSでの同時再生は未検証です。</p></div></div>
+      <div className="bottom-info"><span className="info-icon"><Sparkles size={19} /></span><div><strong>実機再生の検証状況</strong><p>新しい3種類の生成モードはFZMV v3で保存します。高音質は16kHz・4bit ADPCM、レトロとトラッカーは20ms単位の単音データです。FZMV Playerはモードを自動判別し、単音モードは下ボタン長押しで表示を切り替えられます。ブザー推定音は実測した音響特性に基づく校正をしていません。実機の音質・音量や60 FPSでの同時再生は未検証です。</p></div></div>
     </main>
     <footer className="footer"><span className="footer-brand">FLIPFRAME<span> / STUDIO</span></span><span>ENGINE V1.0 <span className="footer-dot">◆</span> LOCAL MEDIA CONVERSION</span><span>BUILT FOR THE TINIEST SCREEN.</span></footer>
   </div>

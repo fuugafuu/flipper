@@ -14,6 +14,8 @@
 
 typedef struct {
     uint16_t version;
+    uint8_t playback_mode; /* 0 cinema, 1 retro, 2 tracker */
+    bool pcm_audio;
     uint16_t fps;
     uint32_t frame_count;
     uint32_t tick_count;
