@@ -28,3 +28,11 @@
 .imported-settings-note svg { flex: none; }
 .imported-settings-note strong { display: block; font-size: 12px; }
 .imported-settings-note p { margin: 7px 0 0; font-size: 11px; line-height: 1.75; color: #94afa5; overflow-wrap: anywhere; }
+.export-copy { flex: 1; }
+.output-name-label { display: block; margin-top: 13px; margin-bottom: 5px; color: #a6c1b2; font-size: 11px; }
+.output-name-field { display: flex; align-items: center; width: min(100%, 400px); border: 1px solid #465d51; border-radius: 6px; background: #101b19; overflow: hidden; }
+.output-name-field:focus-within { border-color: #a9d7ac; }
+.output-name-field input { min-width: 0; flex: 1; border: none; outline: none; background: transparent; color: #ecf6ee; padding: 10px 11px; font: inherit; font-size: 12px; }
+.output-name-field input:disabled { opacity: .55; }
+.output-name-field span { flex: none; padding-right: 10px; font-size: 11px; color: #97b5a3; }
+@media (max-width: 650px) { .export-panel { flex-direction: column; align-items: stretch; } .export-content { width: 100%; } .download-button { width: 100%; } }

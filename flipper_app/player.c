@@ -2,6 +2,8 @@
 #include <furi_hal.h>
 #include <gui/gui.h>
 #include <dialogs/dialogs.h>
+#include <gui/modules/text_input.h>
+#include <gui/view_holder.h>
 #include <storage/storage.h>
 #include <stdio.h>
 #include <string.h>
@@ -25,6 +27,7 @@ typedef struct {
     bool paused;
     bool loaded;
     const char* error;
+    const char* rename_status;
 } PlayerUi;
 
 static void player_draw(Canvas* canvas, void* context) {
@@ -43,22 +46,90 @@ static void player_draw(Canvas* canvas, void* context) {
     furi_mutex_release(ui->draw_mutex);
     if(ui->paused) {
         canvas_set_color(canvas, ColorWhite);
-        canvas_draw_box(canvas, 0, 49, 128, 15);
+        canvas_draw_box(canvas, 0, 42, 128, 22);
         canvas_set_color(canvas, ColorBlack);
         canvas_set_font(canvas, FontSecondary);
         char status[40];
         snprintf(status, sizeof(status), "PAUSE %lu/%lus Vol%u",
                  (unsigned long)(ui->position_ms / 1000u),
                  (unsigned long)(ui->duration_ms / 1000u), ui->volume);
-        canvas_draw_str(canvas, 2, 60, status);
+        canvas_draw_str(canvas, 2, 51, status);
+        canvas_draw_str(canvas, 2, 62, ui->rename_status ? ui->rename_status : "Hold OK: Rename");
     }
 }
 
 static void player_input(InputEvent* input, void* context) {
     PlayerUi* ui = context;
-    if(input->type != InputTypeShort && input->type != InputTypeRepeat) return;
-    uint8_t event = 0x80u | (uint8_t)input->key;
+    if(input->type != InputTypeShort && input->type != InputTypeRepeat &&
+       input->type != InputTypeLong) return;
+    uint8_t event = (input->type == InputTypeLong ? 0x40u : 0x80u) |
+                    (uint8_t)input->key;
     furi_message_queue_put(ui->events, &event, 0);
+}
+
+static void rename_done(void* context) {
+    PlayerUi* ui = context;
+    uint8_t event = 1;
+    furi_message_queue_put(ui->events, &event, 0);
+}
+
+static void rename_cancel(void* context) {
+    PlayerUi* ui = context;
+    uint8_t event = 2;
+    furi_message_queue_put(ui->events, &event, 0);
+}
+
+/* File is closed by the caller. Keep the directory and .fzmv extension;
+ * reject invalid paths and never overwrite another file. */
+static bool player_rename(Gui* gui, Storage* storage, PlayerUi* ui, FuriString* path) {
+    char name[64] = {0};
+    const char* old_path = furi_string_get_cstr(path);
+    const char* slash = strrchr(old_path, '/');
+    const char* base = slash ? slash + 1 : old_path;
+    size_t base_len = strlen(base);
+    if(base_len < 6 || strcmp(base + base_len - 5, ".fzmv") != 0) return false;
+    size_t stem_len = base_len - 5;
+    if(stem_len >= sizeof(name)) stem_len = sizeof(name) - 1;
+    bool ascii = true;
+    for(size_t i = 0; i < stem_len; i++) {
+        if((uint8_t)base[i] < 32 || (uint8_t)base[i] > 126) ascii = false;
+    }
+    if(ascii) memcpy(name, base, stem_len);
+    else strlcpy(name, "video", sizeof(name));
+
+    TextInput* input = text_input_alloc();
+    ViewHolder* holder = view_holder_alloc();
+    text_input_set_header_text(input, "New file name:");
+    text_input_set_minimum_length(input, 1);
+    text_input_set_result_callback(input, rename_done, ui, name, sizeof(name), false);
+    view_holder_attach_to_gui(holder, gui);
+    view_holder_set_back_callback(holder, rename_cancel, ui);
+    view_holder_set_view(holder, text_input_get_view(input));
+    view_holder_send_to_front(holder);
+
+    bool accepted = false;
+    uint8_t event = 0;
+    while(furi_message_queue_get(ui->events, &event, FuriWaitForever) == FuriStatusOk) {
+        if(event == 1) { accepted = true; break; }
+        if(event == 2) break;
+    }
+    view_holder_set_view(holder, NULL);
+    view_holder_free(holder);
+    text_input_free(input);
+
+    if(!accepted || !name[0] || strchr(name, '/') || strchr(name, '\\') ||
+       strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return false;
+
+    FuriString* destination = furi_string_alloc();
+    furi_string_printf(destination, "%.*s%s.fzmv", (int)(base - old_path), old_path, name);
+    const char* target = furi_string_get_cstr(destination);
+    bool success = strcmp(old_path, target) == 0;
+    if(!success && !storage_common_exists(storage, target)) {
+        success = storage_common_rename(storage, old_path, target) == FSE_OK;
+    }
+    if(success) furi_string_set(path, target);
+    furi_string_free(destination);
+    return success;
 }
 
 static uint32_t clamp_seek(uint32_t current, uint32_t duration, bool forward) {
@@ -111,7 +182,7 @@ static void player_tone(File* file, const FzmvInfo* info, uint32_t ms,
               ((ms % 20u) * 100u < (uint32_t)tone.gate * 20u) && tone.gain && volume;
     if(on && (tick != *previous_tick || !*active)) {
         float level = (float)tone.gain / 255.0f * (float)volume / 100.0f;
-        furi_hal_speaker_start((float)tone.frequency, level * 0.55f);
+        furi_hal_speaker_start((float)tone.frequency, level);
         *active = true;
     } else if(!on && *active) {
         furi_hal_speaker_stop();
@@ -124,7 +195,7 @@ int32_t fzmv_player_app(void* arg) {
     UNUSED(arg);
     PlayerUi* ui = malloc(sizeof(PlayerUi));
     memset(ui, 0, sizeof(*ui));
-    ui->volume = 60;
+    ui->volume = 100;
     ui->decoded_frame = UINT32_MAX;
     ui->draw_mutex = furi_mutex_alloc(FuriMutexTypeNormal);
     ui->events = furi_message_queue_alloc(32, sizeof(uint8_t));
@@ -171,10 +242,35 @@ int32_t fzmv_player_app(void* arg) {
     while(running) {
         uint8_t event = 0;
         const FuriStatus received = furi_message_queue_get(ui->events, &event, 8);
+        if(received == FuriStatusOk && event == (0x40u | InputKeyOk)) {
+            if(use_audio_clock) {
+                audio_pwm_stop(audio);
+                use_audio_clock = false;
+            }
+            if(tone_acquired && tone_active) furi_hal_speaker_stop();
+            tone_active = false;
+            ui->paused = true;
+            anchor_ms = ui->position_ms;
+            storage_file_close(file);
+            opened = false;
+            /* Discard pending PWM wakeups before waiting for the text input result. */
+            uint8_t pending_event;
+            while(furi_message_queue_get(ui->events, &pending_event, 0) == FuriStatusOk) {}
+            bool renamed = player_rename(gui, storage, ui, path);
+            ui->rename_status = renamed ? "Renamed" : "Rename cancelled/failed";
+            if(!storage_file_open(file, furi_string_get_cstr(path), FSAM_READ, FSOM_OPEN_EXISTING)) {
+                ui->error = "Cannot reopen file";
+                break;
+            }
+            opened = true;
+            view_port_update(ui->viewport);
+            continue;
+        }
         if(received == FuriStatusOk && (event & 0x80u)) {
             InputKey key = (InputKey)(event & 0x7fu);
             if(key == InputKeyBack) break;
             if(key == InputKeyOk) {
+                ui->rename_status = NULL;
                 if(!ui->paused) {
                     if(use_audio_clock) audio_pwm_stop(audio);
                     if(tone_acquired && tone_active) furi_hal_speaker_stop();

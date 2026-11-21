@@ -54,6 +54,7 @@ function MiniWave({ audio, pcm }: { audio: { gain: number }[]; pcm?: PcmAudio })
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null)
+  const [outputName, setOutputName] = useState('')
   const [imported, setImported] = useState(false)
   const [sourceUrl, setSourceUrl] = useState('')
   const [settings, setSettings] = useState<Settings>(initialSettings)
@@ -133,6 +134,7 @@ export default function App() {
     abortController.current?.abort()
     setWorking(false)
     setFile(selected)
+    setOutputName(selected.name.replace(/\.[^.]+$/, ''))
     setImported(isFzmv)
     setResult(null)
     setPosition(0)
@@ -258,7 +260,8 @@ export default function App() {
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = `${file.name.replace(/\.[^.]+$/, '').replace(/[^\p{L}\p{N}_-]/gu, '_')}.fzmv`
+    const safeName = outputName.trim().replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').replace(/[. ]+$/g, '').slice(0, 100)
+    link.download = `${safeName || 'flipper_video'}.fzmv`
     document.body.appendChild(link)
     link.click()
     link.remove()
@@ -359,13 +362,25 @@ export default function App() {
             </div>
           </div>
 
-          <div className="panel export-panel"><div className="export-content"><div className="export-icon"><HardDrive size={22} /></div><div className="export-copy"><span className="export-eyebrow">{imported ? 'IMPORTED FILE / .FZMV' : 'OUTPUT FILE / .FZMV'}</span><h3>{clip ? imported ? 'FZMVを読み込みました' : '変換が完了しました' : '書き出しの準備ができています'}</h3><p>{clip ? `${clip.frames.length}フレーム · ${clip.pcm ? '16kHz ADPCM音声' : `${clip.audio.length}単音ステップ`} · ${niceBytes(result!.binary.length)}` : '変換するとFlipper Zero向け独自ファイルをダウンロードできます。'}</p></div></div><button className="download-button" disabled={!clip} onClick={save}><ArrowDownToLine size={18} /> ダウンロード</button></div>
+          <div className="panel export-panel">
+            <div className="export-content">
+              <div className="export-icon"><HardDrive size={22} /></div>
+              <div className="export-copy">
+                <span className="export-eyebrow">{imported ? 'IMPORTED FILE / .FZMV' : 'OUTPUT FILE / .FZMV'}</span>
+                <h3>{clip ? imported ? 'FZMVを読み込みました' : '変換が完了しました' : '書き出しの準備ができています'}</h3>
+                <p>{clip ? `${clip.frames.length}フレーム · ${clip.pcm ? '16kHz ADPCM音声' : `${clip.audio.length}単音ステップ`} · ${niceBytes(result!.binary.length)}` : '変換するとFlipper Zero向け独自ファイルをダウンロードできます。'}</p>
+                <label className="output-name-label" htmlFor="output-name">保存ファイル名</label>
+                <div className="output-name-field"><input id="output-name" type="text" value={outputName} onChange={event => setOutputName(event.target.value)} placeholder="ファイル名" maxLength={100} disabled={!file} autoComplete="off" /><span>.fzmv</span></div>
+              </div>
+            </div>
+            <button className="download-button" disabled={!clip} onClick={save}><ArrowDownToLine size={18} /> ダウンロード</button>
+          </div>
           {result?.warnings.map((warning, i) => <div className="notice notice-warn" key={i}><CircleAlert size={16} /> {warning}</div>)}
           <div className="spec-grid"><div className="spec"><span className="spec-icon"><MonitorPlay size={18} /></span><span>DISPLAY</span><strong>128 × 64</strong><small>MONOCHROME LCD</small></div><div className="spec"><span className="spec-icon"><Activity size={18} /></span><span>AUDIO</span><strong>{(imported && clip ? Boolean(clip.pcm) : settings.tone === 'pcm') ? '16k' : '100–2500'} <i>Hz</i></strong><small>{(imported && clip ? Boolean(clip.pcm) : settings.tone === 'pcm') ? '4-BIT IMA ADPCM' : 'SINGLE TONE'}</small></div><div className="spec"><span className="spec-icon"><Clock3 size={18} /></span><span>FRAME RATE</span><strong>{imported && clip ? clip.fps : settings.fps} <i>FPS</i></strong><small>{imported && clip ? 'IMPORTED FILE' : 'CONFIGURABLE'}</small></div></div>
         </section>
       </div>
 
-      <div className="bottom-info"><span className="info-icon"><Sparkles size={19} /></span><div><strong>実機再生に向けたプロトタイプ形式</strong><p>高音質モードはFZMV v2（16kHz・4bit ADPCM音声）を生成します。既存の単音モードはv1形式です。Flipper ZeroにはPCM再生アプリの実装例がありますが、今回の独自形式を再生する実機アプリは未実装です。音声プレビューの「ブザー推定音」は周波数帯域などを仮定した試聴用の音で、実機音響特性に基づく校正はしていません。実機の音質・音量や60 FPSでの同時再生は未検証です。</p></div></div>
+      <div className="bottom-info"><span className="info-icon"><Sparkles size={19} /></span><div><strong>実機再生の検証状況</strong><p>高音質モードはFZMV v2（16kHz・4bit ADPCM音声）を生成します。既存の単音モードはv1形式です。専用のFZMV Playerアプリを開発しています。音声プレビューの「ブザー推定音」は周波数帯域などを仮定した試聴用の音で、実機音響特性に基づく校正はしていません。実機の音質・音量や60 FPSでの同時再生は未検証です。</p></div></div>
     </main>
     <footer className="footer"><span className="footer-brand">FLIPFRAME<span> / STUDIO</span></span><span>ENGINE V1.0 <span className="footer-dot">◆</span> LOCAL MEDIA CONVERSION</span><span>BUILT FOR THE TINIEST SCREEN.</span></footer>
   </div>

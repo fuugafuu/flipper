@@ -44,9 +44,11 @@ static void fill_half(AudioPwm* audio, File* file, const FzmvInfo* info, uint32_
             }
             value = audio->decoded[(skip + i) % 256u];
         }
-        /* 16-bit signed PCM -> 8-bit PWM. Keep headroom on a piezo speaker. */
+        /* Compress dynamic range for the low-efficiency piezo speaker.
+         * The bounded transfer curve avoids hard clipping at full volume. */
         int32_t scaled = ((int32_t)value * audio->volume) / 100;
-        int32_t pwm = 128 + (scaled >> 8);
+        int32_t magnitude = scaled < 0 ? -scaled : scaled;
+        int32_t pwm = 128 + scaled * 124 / (magnitude + 7000);
         if(pwm < 2) pwm = 2;
         if(pwm > 253) pwm = 253;
         audio->dma[dst_offset + i] = (uint16_t)pwm;
