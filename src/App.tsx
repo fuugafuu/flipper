@@ -81,6 +81,7 @@ export default function App() {
 
   const isVideo = Boolean(file && (file.type.startsWith('video/') || /\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(file.name)))
   const clip = result?.clip
+  const playbackMode = clip?.mode === 'all' ? settings.mode : clip?.mode ?? settings.mode
   const duration = (clip?.durationMs || 0) / 1000
 
   const stop = useCallback(() => {
@@ -116,7 +117,7 @@ export default function App() {
     const index = Math.max(0, Math.min(clip.frames.length - 1, Math.floor(seconds * clip.fps + 0.000001)))
     const pixels = context.createImageData(128, 64)
     context.putImageData(frameToImageData(clip.frames[index], pixels), 0, 0)
-    if (clip.mode === 'tracker') {
+    if (playbackMode === 'tracker') {
       const tone = clip.audio[Math.min(clip.audio.length - 1, Math.floor(seconds * 50))]
       const frequency = tone?.frequency ?? 0
       const noteNumber = frequency ? Math.round(69 + 12 * Math.log2(frequency / 440)) : -1
@@ -134,7 +135,7 @@ export default function App() {
       context.font = '8px monospace'
       context.fillText('8BIT MONO / LIVE PITCH', 5, 61)
     }
-  }, [clip])
+  }, [clip, playbackMode])
 
   useEffect(() => {
     drawConvertedFrame(position)
@@ -182,6 +183,11 @@ export default function App() {
   }
 
   const updateSettings = <K extends keyof Settings>(key: K, value: Settings[K]) => {
+    if (key === 'mode') {
+      stop()
+      setSettings(previous => ({ ...previous, [key]: value }))
+      return
+    }
     setSettings(previous => ({ ...previous, [key]: value }))
     if (imported) return
     if (result) {
@@ -225,8 +231,8 @@ export default function App() {
     const generation = ++playGeneration.current
     try {
       let audio: PlaybackHandle | null = null
-      if (clip.pcm) audio = playPcm(clip.pcm, startAt, previewMode)
-      else if (clip.audio.some(tick => tick.frequency > 0 && tick.gain > 0)) audio = playBuzzer(clip.audio, startAt)
+      if (playbackMode === 'video-hifi' && clip.pcm) audio = playPcm(clip.pcm, startAt, previewMode)
+      else if (playbackMode !== 'video-hifi' && clip.audio.some(tick => tick.frequency > 0 && tick.gain > 0)) audio = playBuzzer(clip.audio, startAt)
       if (generation !== playGeneration.current) { audio?.stop(); return }
       oscillator.current = audio
       const startedAt = performance.now() + (audio ? 60 : 0)
@@ -343,7 +349,8 @@ export default function App() {
           <section className="panel settings-panel">
             <div className="panel-heading"><div className="panel-heading-left"><span className="step-label">02</span><h3>変換パラメータ</h3></div><SlidersHorizontal size={17} className="dim-icon" /></div>
             {imported ? <div className="imported-settings-note"><Check size={20} /><div><strong>{clip ? 'FZMVの読み込みが完了しました' : error ? 'FZMVの読み込みに失敗しました' : 'FZMVを読み込み中です'}</strong><p>{error || (clip ? '右側のプレビューで映像と音声を再生できます。ブザー推定音も試聴できます。' : '読み込みが終わるとプレビューに表示されます。')}</p></div></div> : <>
-            <div className="settings-group-label"><Film size={15} /> VIDEO <span>映像設定</span></div>
+            <div className="settings-group-label"><Film size={15} /> VIDEO <span>映像設定・プレビュー方式</span></div>
+            <div className="full-duration-note">3種類すべてを1つのFZMV v4に保存します。選択はプレビュー方式だけを変更します。</div>
             <div className="mode-choices" role="group" aria-label="生成モード">
               {([
                 ['video-hifi', 'CINEMA', '動画＋高音質', '16kHz ADPCMで音楽や声を再生'],
@@ -367,14 +374,17 @@ export default function App() {
               <QualitySlider label="ちらつき抑制" value={settings.stability} display={`${settings.stability}%`} min={0} max={100} onChange={value => updateSettings('stability', value)} hint="連続フレームの表示を安定化" />
             </div>
             <div className="settings-group-label audio-group"><AudioLines size={15} /> AUDIO <span>ブザー設定</span></div>
-            {settings.mode !== 'video-hifi' && <ControlSelect label="音程解析" value={settings.tone} choices={[{ value: 'melody', label: 'メロディー優先' }, { value: 'voice', label: 'ボーカル優先' }]} onChange={value => updateSettings('tone', value as Settings['tone'])} />}
-            <div className="audio-hint"><Waves size={15} /><span>{settings.mode === 'video-hifi' ? '音声波形を16kHz 4bit IMA ADPCMで保存します。実機ブザーの帯域・音量による制約があります。' : '音声を20msごとに解析し、12平均律に補正した矩形波の音程を記録します。同時に鳴る楽器は単音に集約されます。'}</span></div>
+            <ControlSelect label="音程解析" value={settings.tone} choices={[{ value: 'melody', label: 'メロディー優先' }, { value: 'voice', label: 'ボーカル優先' }]} onChange={value => updateSettings('tone', value as Settings['tone'])} />
+            <div className="audio-hint"><Waves size={15} /><span>16kHz 4bit IMA ADPCM音声と、20ms単位の矩形波音程データを両方保存します。実機音質はハードウェアに依存します。</span></div>
             {working && <div className="progress-area" role="status"><div className="progress-head"><span>{status}</span><strong>{Math.round(progress * 100)}%</strong></div><div className="progress-track"><div style={{ width: `${progress * 100}%` }} /></div></div>}
             {error && <div className="error-box" role="alert"><CircleAlert size={16} />{error}</div>}
             <button className={`convert-button ${working ? 'converting' : ''}`} onClick={() => { if (working) abortController.current?.abort(); else void convert() }} disabled={imported || (!file && !working)}>
               {imported ? <><Check size={18} /> {clip ? 'FZMV読込完了 · 右側で再生' : status || 'FZMVを確認中'}</> : working ? <><X size={17} /> 変換を中止する <span>{Math.round(progress * 100)}%</span></> : <><Zap size={18} fill="currentColor" /> {result ? '設定を変更して再変換' : '変換を開始する'} <ArrowRight size={18} className="button-arrow" /></>}
             </button>
             </>}
+            {imported && clip?.mode === 'all' && <div className="mode-choices" role="group" aria-label="プレビュー方式">{([
+              ['video-hifi', '高音質＋動画'], ['video-8bit', '8bit風＋動画'], ['tracker', '音程表示'],
+            ] as const).map(([mode, title]) => <button key={mode} type="button" className={`mode-choice ${settings.mode === mode ? 'active' : ''}`} aria-pressed={settings.mode === mode} onClick={() => updateSettings('mode', mode)}><strong>{title}</strong></button>)}</div>}
           </section>
         </aside>
 
@@ -392,8 +402,8 @@ export default function App() {
               </div>
             </div>
 
-            <div className="transport"><div className="transport-top"><div className="transport-name"><MonitorPlay size={16} /> {imported ? 'IMPORTED FZMV PLAYBACK' : 'CONVERTED PLAYBACK'} <span>映像・音声同期</span></div><span className="transport-time">{formatTime(position)} <span>/</span> {formatTime(duration)}</span></div>
-              {clip?.pcm && <div className="audio-preview-control">
+            <div className="transport"><div className="transport-top"><div className="transport-name"><MonitorPlay size={16} /> {imported ? 'IMPORTED FZMV PLAYBACK' : 'CONVERTED PLAYBACK'} <span>{playbackMode === 'video-hifi' ? '高音質' : playbackMode === 'video-8bit' ? '8bit音声' : '音程表示'}</span></div><span className="transport-time">{formatTime(position)} <span>/</span> {formatTime(duration)}</span></div>
+              {clip?.pcm && playbackMode === 'video-hifi' && <div className="audio-preview-control">
                 <div className="audio-preview-header"><Volume2 size={14} /><span>音声プレビュー方式</span></div>
                 <div className="audio-preview-buttons" role="group" aria-label="音声プレビュー方式">
                   <button type="button" className={audioPreviewMode === 'buzzer' ? 'active' : ''} aria-pressed={audioPreviewMode === 'buzzer'} onClick={() => changeAudioPreviewMode('buzzer')}>ブザー推定音</button>
@@ -404,7 +414,7 @@ export default function App() {
                   : 'FZMVのADPCM音声を復号して再生します。スマホやPCのスピーカーでは実機より良く聞こえます。'}</p>
               </div>}
               <div className="transport-bottom"><button className="play-button" disabled={!clip} aria-label={playing ? '一時停止' : '再生'} onClick={() => void togglePlayback()}>{playing ? <Pause size={19} fill="currentColor" /> : <Play size={19} fill="currentColor" />}</button><input type="range" className="timeline" aria-label="再生位置" disabled={!clip} min={0} max={Math.max(0.01, duration)} step={0.02} value={position} onChange={event => { stop(); setPosition(Number(event.target.value)) }} style={{ '--seek-progress': `${duration ? position / duration * 100 : 0}%` } as React.CSSProperties} /><button className="replay-button" aria-label="先頭に戻る" disabled={!clip} onClick={() => { stop(); setPosition(0) }}><RotateCcw size={18} /></button></div>
-              <div className="transport-wave"><MiniWave audio={clip?.audio || []} pcm={clip?.pcm} /><div className="transport-footnote"><Volume2 size={14} /> {clip && !clip.pcm && !clip.audio.some(tick => tick.frequency && tick.gain) ? 'この変換結果に再生可能な音声はありません。元の動画から再変換してください。' : 'スマホでは再生ボタンを押して音声を有効にしてください'}</div></div>
+              <div className="transport-wave"><MiniWave audio={clip?.audio || []} pcm={playbackMode === 'video-hifi' ? clip?.pcm : undefined} /><div className="transport-footnote"><Volume2 size={14} /> {clip && !clip.pcm && !clip.audio.some(tick => tick.frequency && tick.gain) ? 'この変換結果に再生可能な音声はありません。元の動画から再変換してください。' : 'スマホでは再生ボタンを押して音声を有効にしてください'}</div></div>
             </div>
           </div>
 
@@ -414,7 +424,7 @@ export default function App() {
               <div className="export-copy">
                 <span className="export-eyebrow">{imported ? 'IMPORTED FILE / .FZMV' : 'OUTPUT FILE / .FZMV'}</span>
                 <h3>{clip ? imported ? 'FZMVを読み込みました' : '変換が完了しました' : '書き出しの準備ができています'}</h3>
-                <p>{clip ? `${clip.frames.length}フレーム · ${clip.pcm ? '16kHz ADPCM音声' : `${clip.audio.length}単音ステップ`} · ${niceBytes(result!.binary.length)}` : '変換するとFlipper Zero向け独自ファイルをダウンロードできます。'}</p>
+                <p>{clip ? `${clip.frames.length}フレーム · ${clip.mode === 'all' ? '3モード同梱' : clip.pcm ? '16kHz ADPCM音声' : `${clip.audio.length}単音ステップ`} · ${niceBytes(result!.binary.length)}` : '変換するとFlipper Zero向け独自ファイルをダウンロードできます。'}</p>
                 <label className="output-name-label" htmlFor="output-name">保存ファイル名</label>
                 <div className="output-name-field"><input id="output-name" type="text" value={outputName} onChange={event => setOutputName(event.target.value)} placeholder="ファイル名" maxLength={100} disabled={!file} autoComplete="off" /><span>.fzmv</span></div>
               </div>

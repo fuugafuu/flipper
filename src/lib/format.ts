@@ -6,7 +6,7 @@ export const FRAME_BYTES = WIDTH * HEIGHT / 8
 export const AUDIO_TICK_MS = 20
 export type BuzzerTick = { frequency: number; gain: number; gate: number }
 export type FlipperClip = {
-  mode?: 'video-hifi' | 'video-8bit' | 'tracker'
+  mode?: 'video-hifi' | 'video-8bit' | 'tracker' | 'all'
   fps: number
   durationMs: number
   frames: Uint8Array[]
@@ -67,7 +67,7 @@ export function encodeClip(clip: FlipperClip): Uint8Array {
     throw new Error('FPSまたはフレーム数が不正です')
   }
   if (clip.pcm) {
-    if (clip.audio.length) throw new Error('PCMとブザーイベントは同時に格納できません')
+    if (clip.mode !== 'all' && clip.audio.length) throw new Error('PCMとブザーイベントは同時に格納できません')
     validateAdpcm(clip.pcm)
   }
   const records: Uint8Array[] = []
@@ -93,24 +93,24 @@ export function encodeClip(clip: FlipperClip): Uint8Array {
   const frameIndexOffset = 64
   const frameDataOffset = frameIndexOffset + clip.frames.length * 4
   const audioOffset = frameDataOffset + records.reduce((size, record) => size + record.length, 0)
-  const audioBytes = clip.pcm ? clip.pcm.data.length : clip.audio.length * 4
+  const audioBytes = (clip.pcm?.data.length ?? 0) + (clip.mode === 'all' ? clip.audio.length * 4 : clip.pcm ? 0 : clip.audio.length * 4)
   if (audioOffset + audioBytes > 0xffffffff) throw new Error('変換データがFZMV形式の4GB上限を超えています')
   const file = new Uint8Array(audioOffset + audioBytes)
   const view = new DataView(file.buffer)
   file.set([0x46, 0x5a, 0x4d, 0x56]) // FZMV
-  view.setUint16(4, clip.mode ? 3 : clip.pcm ? 2 : 1, true)
+  view.setUint16(4, clip.mode === 'all' ? 4 : clip.mode ? 3 : clip.pcm ? 2 : 1, true)
   view.setUint16(6, 64, true)
   view.setUint16(8, WIDTH, true)
   view.setUint16(10, HEIGHT, true)
   view.setUint16(12, clip.fps, true)
-  view.setUint16(14, clip.pcm ? 0 : AUDIO_TICK_MS, true)
+  view.setUint16(14, clip.mode === 'all' ? AUDIO_TICK_MS : clip.pcm ? 0 : AUDIO_TICK_MS, true)
   view.setUint32(16, clip.frames.length, true)
   view.setUint32(20, clip.audio.length, true)
   view.setUint32(24, frameIndexOffset, true)
   view.setUint32(28, frameDataOffset, true)
   view.setUint32(32, audioOffset, true)
   view.setUint32(36, clip.durationMs, true)
-  view.setUint32(40, clip.pcm ? 2 : clip.audio.length ? 1 : 0, true)
+  view.setUint32(40, clip.mode === 'all' ? 3 : clip.pcm ? 2 : clip.audio.length ? 1 : 0, true)
   view.setUint32(44, file.length, true)
   if (clip.pcm) {
     view.setUint32(48, clip.pcm.sampleRate, true)
@@ -119,7 +119,7 @@ export function encodeClip(clip: FlipperClip): Uint8Array {
     view.setUint16(58, PCM_BLOCK_SAMPLES, true)
     view.setUint16(60, PCM_BLOCK_BYTES, true)
   }
-  if (clip.mode) view.setUint8(62, { 'video-hifi': 0, 'video-8bit': 1, tracker: 2 }[clip.mode])
+  if (clip.mode) view.setUint8(62, { 'video-hifi': 0, 'video-8bit': 1, tracker: 2, all: 0 }[clip.mode])
   let position = frameDataOffset
   records.forEach((record, i) => {
     view.setUint32(frameIndexOffset + i * 4, position, true)
@@ -128,7 +128,7 @@ export function encodeClip(clip: FlipperClip): Uint8Array {
   })
   if (clip.pcm) file.set(clip.pcm.data, audioOffset)
   clip.audio.forEach((tick, i) => {
-    const offset = audioOffset + i * 4
+    const offset = audioOffset + (clip.pcm?.data.length ?? 0) + i * 4
     view.setUint16(offset, Math.max(0, Math.min(2500, Math.round(tick.frequency))), true)
     view.setUint8(offset + 2, Math.max(0, Math.min(255, Math.round(tick.gain))))
     view.setUint8(offset + 3, Math.max(0, Math.min(100, Math.round(tick.gate))))
@@ -140,7 +140,7 @@ export function decodeClip(bytes: Uint8Array): FlipperClip {
   if (bytes.length < 64 || String.fromCharCode(...bytes.subarray(0, 4)) !== 'FZMV') throw new Error('FZMV形式ではありません')
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const version = view.getUint16(4, true)
-  if ((version !== 1 && version !== 2 && version !== 3) || view.getUint16(6, true) !== 64 ||
+  if ((version !== 1 && version !== 2 && version !== 3 && version !== 4) || view.getUint16(6, true) !== 64 ||
     view.getUint16(8, true) !== WIDTH || view.getUint16(10, true) !== HEIGHT ||
     view.getUint16(14, true) !== (version === 2 || (version === 3 && view.getUint32(40, true) === 2) ? 0 : AUDIO_TICK_MS) || view.getUint32(44, true) !== bytes.length) {
     throw new Error('非対応のFZMVバージョンまたはヘッダーです')
@@ -153,12 +153,15 @@ export function decodeClip(bytes: Uint8Array): FlipperClip {
   const audioOffset = view.getUint32(32, true)
   const durationMs = view.getUint32(36, true)
   const flags = view.getUint32(40, true)
-  const isPcm = version >= 2 && flags === 2
-  const mode = version === 3 ? (['video-hifi', 'video-8bit', 'tracker'] as const)[bytes[62]] : undefined
+  const isPcm = (version >= 2 && flags === 2) || (version === 4 && view.getUint32(52, true) > 0)
+  const mode = version === 4 ? 'all' : version === 3 ? (['video-hifi', 'video-8bit', 'tracker'] as const)[bytes[62]] : undefined
+  const pcmBytes = isPcm ? Math.ceil(view.getUint32(52, true) / PCM_BLOCK_SAMPLES) * PCM_BLOCK_BYTES : 0
+  const toneOffset = audioOffset + pcmBytes
   if (fps === 0 || fps > 60 || frameCount === 0 || indexOffset < 64 || dataOffset < indexOffset + frameCount * 4 ||
-    audioOffset < dataOffset || (!isPcm && audioOffset + audioCount * 4 !== bytes.length) ||
+    audioOffset < dataOffset || (version !== 4 && !isPcm && audioOffset + audioCount * 4 !== bytes.length) ||
     (version === 2 && (!isPcm || audioCount !== 0)) || (version === 1 && flags !== (audioCount ? 1 : 0)) ||
-    (version === 3 && (!mode || (mode !== 'video-hifi' && isPcm) || (mode === 'video-hifi' && audioCount !== 0) || (isPcm && audioCount !== 0) || (!isPcm && flags !== (audioCount ? 1 : 0))))) {
+    (version === 3 && (!mode || (mode !== 'video-hifi' && isPcm) || (mode === 'video-hifi' && audioCount !== 0) || (isPcm && audioCount !== 0) || (!isPcm && flags !== (audioCount ? 1 : 0)))) ||
+    (version === 4 && (flags !== 3 || bytes[62] !== 0 || toneOffset + audioCount * 4 !== bytes.length))) {
     throw new Error('FZMVのオフセットが不正です')
   }
   let pcm: PcmAudio | undefined
@@ -170,7 +173,7 @@ export function decodeClip(bytes: Uint8Array): FlipperClip {
     pcm = {
       sampleRate: view.getUint32(48, true),
       sampleCount: view.getUint32(52, true),
-      data: bytes.slice(audioOffset),
+      data: bytes.slice(audioOffset, toneOffset),
     }
     validateAdpcm(pcm)
   }
@@ -194,7 +197,7 @@ export function decodeClip(bytes: Uint8Array): FlipperClip {
   }
   const audio: BuzzerTick[] = []
   for (let i = 0; i < audioCount; i++) {
-    const offset = audioOffset + i * 4
+    const offset = toneOffset + i * 4
     audio.push({ frequency: view.getUint16(offset, true), gain: bytes[offset + 2], gate: bytes[offset + 3] })
   }
   return { fps, durationMs, frames, audio, ...(pcm ? { pcm } : {}), ...(mode ? { mode } : {}) }

@@ -76,3 +76,23 @@ describe('FZMV v3 playback modes', () => {
     expect(decodeClip(encodeClip(source))).toEqual(source)
   })
 })
+
+describe('FZMV v4 three-mode container', () => {
+  it('stores full video, ADPCM and retro/tracker tone data in one file', () => {
+    const samples = Int16Array.from({ length: 777 }, (_, i) => Math.round(9000 * Math.sin(i / 11)))
+    const source: FlipperClip = { ...fixture(), mode: 'all', pcm: encodeAdpcm(samples) }
+    const bytes = encodeClip(source)
+    const view = new DataView(bytes.buffer)
+    expect(view.getUint16(4, true)).toBe(4)
+    expect(view.getUint32(40, true)).toBe(3)
+    expect(decodeClip(bytes)).toEqual(source)
+    const corrupt = bytes.slice()
+    corrupt[44]--
+    expect(() => decodeClip(corrupt)).toThrow()
+  })
+
+  it('keeps all three modes available for a silent video', () => {
+    const source: FlipperClip = { ...fixture(), mode: 'all', audio: [] }
+    expect(decodeClip(encodeClip(source))).toEqual(source)
+  })
+})

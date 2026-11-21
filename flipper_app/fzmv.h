@@ -22,6 +22,7 @@ typedef struct {
     uint32_t frame_index_offset;
     uint32_t frame_data_offset;
     uint32_t audio_offset;
+    uint32_t tone_offset;
     uint32_t duration_ms;
     uint32_t sample_count;
     uint32_t file_size;

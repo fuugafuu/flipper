@@ -24,6 +24,7 @@ typedef struct {
     uint32_t position_ms;
     uint32_t duration_ms;
     uint8_t volume;
+    uint8_t playback_mode;
     bool tracker;
     uint16_t frequency;
     uint8_t gain;
@@ -74,7 +75,7 @@ static void player_draw(Canvas* canvas, void* context) {
         canvas_draw_frame(canvas, 5, 39, 118, 9);
         canvas_draw_box(canvas, 6, 40, (uint8_t)((uint32_t)ui->gain * 116 / 255), 7);
         canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 5, 62, ui->paused ? "OK Play  Long Down: View" : "8BIT / MONO");
+        canvas_draw_str(canvas, 5, 62, ui->paused ? "OK Play  Hold Down: Mode" : "8BIT / MONO");
     } else {
         furi_mutex_acquire(ui->draw_mutex, FuriWaitForever);
         memcpy(canvas_get_buffer(canvas), ui->display, FZMV_FRAME_BYTES);
@@ -90,7 +91,7 @@ static void player_draw(Canvas* canvas, void* context) {
                  (unsigned long)(ui->position_ms / 1000u),
                  (unsigned long)(ui->duration_ms / 1000u), ui->volume);
         canvas_draw_str(canvas, 2, 51, status);
-        canvas_draw_str(canvas, 2, 62, ui->rename_status ? ui->rename_status : "Long Down: View  OK: Rename");
+        canvas_draw_str(canvas, 2, 62, ui->rename_status ? ui->rename_status : "Hold Down: Mode  OK: Rename");
     }
 }
 
@@ -261,6 +262,7 @@ int32_t fzmv_player_app(void* arg) {
     opened = true;
     if(!fzmv_open(file, &info, &ui->error)) goto done;
     ui->duration_ms = info.duration_ms;
+    ui->playback_mode = info.playback_mode;
     ui->tracker = info.playback_mode == 2;
     ui->loaded = true;
     if(!ui->tracker && !player_frame(file, &info, ui, 0)) goto done;
@@ -280,8 +282,32 @@ int32_t fzmv_player_app(void* arg) {
         uint8_t event = 0;
         const FuriStatus received = furi_message_queue_get(ui->events, &event, 8);
         if(received == FuriStatusOk && event == (0x40u | InputKeyDown) &&
-           !info.pcm_audio) {
-            ui->tracker = !ui->tracker;
+           (info.version == 4 || !info.pcm_audio)) {
+            if(use_audio_clock) {
+                audio_pwm_stop(audio);
+                use_audio_clock = false;
+            }
+            if(tone_acquired) {
+                if(tone_active) furi_hal_speaker_stop();
+                furi_hal_speaker_release();
+                tone_acquired = false;
+                tone_active = false;
+            }
+            ui->playback_mode = info.version == 4 ? (ui->playback_mode + 1) % 3 :
+                                (ui->playback_mode == 2 ? 1 : 2);
+            ui->tracker = ui->playback_mode == 2;
+            previous_tick = UINT32_MAX;
+            anchor_ms = ui->position_ms;
+            anchor_tick = furi_get_tick();
+            if(!ui->paused) {
+                if(ui->playback_mode == 0 && info.pcm_audio) {
+                    use_audio_clock = audio_pwm_start(audio, file, &info,
+                        (uint32_t)((uint64_t)anchor_ms * FZMV_PCM_RATE / 1000u),
+                        ui->volume, ui->events);
+                } else if(info.tick_count) {
+                    tone_acquired = furi_hal_speaker_acquire(100);
+                }
+            }
             if(!ui->tracker) player_frame(file, &info, ui, ui->position_ms);
             view_port_update(ui->viewport);
             continue;
@@ -329,10 +355,12 @@ int32_t fzmv_player_app(void* arg) {
                         if(!ui->tracker) player_frame(file, &info, ui, 0);
                     }
                     anchor_tick = furi_get_tick();
-                    if(info.pcm_audio) {
+                    if(info.pcm_audio && ui->playback_mode == 0) {
                         use_audio_clock = audio_pwm_start(audio, file, &info,
                             (uint32_t)((uint64_t)anchor_ms * FZMV_PCM_RATE / 1000u),
                             ui->volume, ui->events);
+                    } else if(info.tick_count && !tone_acquired) {
+                        tone_acquired = furi_hal_speaker_acquire(100);
                     }
                     ui->paused = false;
                 }
@@ -341,13 +369,13 @@ int32_t fzmv_player_app(void* arg) {
                 anchor_ms = clamp_seek(ui->position_ms, info.duration_ms, key == InputKeyRight);
                 anchor_tick = furi_get_tick();
                 ui->position_ms = anchor_ms;
-                if(info.pcm_audio && use_audio_clock && !ui->paused) {
+                if(info.pcm_audio && ui->playback_mode == 0 && use_audio_clock && !ui->paused) {
                     audio_pwm_stop(audio);
                     use_audio_clock = audio_pwm_start(audio, file, &info,
                         (uint32_t)((uint64_t)anchor_ms * FZMV_PCM_RATE / 1000u),
                         ui->volume, ui->events);
                 }
-                if(!info.pcm_audio && tone_active) {
+                if(tone_active) {
                     furi_hal_speaker_stop();
                     tone_active = false;
                 }
@@ -382,7 +410,7 @@ int32_t fzmv_player_app(void* arg) {
             view_port_update(ui->viewport);
             continue;
         }
-        if(!info.pcm_audio && tone_acquired) {
+        if((ui->playback_mode != 0 || (info.version != 4 && !info.pcm_audio)) && tone_acquired) {
             player_tone(file, &info, ui->position_ms, ui->volume, &tone_active, &previous_tick);
         }
         if(ui->tracker) {

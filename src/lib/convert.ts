@@ -74,15 +74,12 @@ export async function convertMedia(
       const buffer = await decodeAudio(file, message => onProgress(0.07, message))
       audioDuration = buffer.duration
       if (!video) sourceDuration = buffer.duration
-      if (settings.mode === 'video-hifi') {
-        pcm = await preparePcm(buffer, Math.min(sourceDuration, audioDuration), progress => {
-          onProgress(0.1 + progress * 0.32, '音楽・音声の波形を最適化中 · ADPCM圧縮')
-        }, signal)
-      } else {
-        audio = await trackBuzzer(buffer, Math.min(sourceDuration, audioDuration), settings, progress => {
-          onProgress(0.1 + progress * 0.32, 'スペクトル解析 · ブザー信号を最適化中')
-        }, signal)
-      }
+      pcm = await preparePcm(buffer, Math.min(sourceDuration, audioDuration), progress => {
+        onProgress(0.1 + progress * 0.16, '高音質トラックを圧縮中 · ADPCM')
+      }, signal)
+      audio = await trackBuzzer(buffer, Math.min(sourceDuration, audioDuration), { ...settings, mode: 'video-8bit' }, progress => {
+        onProgress(0.26 + progress * 0.16, '8bit音声と音程表示用トラックを解析中')
+      }, signal)
     } catch (error) {
       abortIfNeeded(signal)
       if (!video) throw error
@@ -97,8 +94,8 @@ export async function convertMedia(
     canvas.height = 64
     const context = canvas.getContext('2d', { willReadFrequently: true })
     if (!context) throw new Error('Canvasを初期化できませんでした')
-    // Audio-only tracker uses a single reusable bitmap. The device draws pitch in real time.
-    const count = settings.mode === 'tracker' ? 1 : Math.max(1, Math.ceil(duration * settings.fps))
+    // All three playback options share the same video frames and a single tone stream.
+    const count = Math.max(1, Math.ceil(duration * settings.fps))
     let previous: Uint8Array | undefined
     const toneState = {}
     const audioLevels = pcm ? pcmWaveform(pcm, Math.max(1, count)) : undefined
@@ -107,11 +104,7 @@ export async function convertMedia(
       abortIfNeeded(signal)
       const seconds = i / settings.fps
       let region
-      if (settings.mode === 'tracker') {
-        context.fillStyle = '#fff'
-        context.fillRect(0, 0, 128, 64)
-        region = undefined
-      } else if (video) {
+      if (video) {
         await seek(video, Math.min(seconds, Math.max(0, sourceDuration - 0.02)), signal)
         region = renderSource(context, video, video.videoWidth, video.videoHeight, settings.fit)
       } else {
@@ -129,7 +122,7 @@ export async function convertMedia(
 
     if (audioDuration > 0 && audio.length === 0 && !pcm) warnings.push('音声の変換結果は空でした。')
     onProgress(0.98, 'FZMVコンテナを書き出しています')
-    const original: FlipperClip = { mode: settings.mode, fps: settings.mode === 'tracker' ? 1 : settings.fps, durationMs: Math.round(duration * 1000), frames, audio, ...(pcm ? { pcm } : {}) }
+    const original: FlipperClip = { mode: 'all', fps: settings.fps, durationMs: Math.round(duration * 1000), frames, audio, ...(pcm ? { pcm } : {}) }
     const binary = encodeClip(original)
     // The preview decodes the exported bytes, exactly as a future player should.
     const clip = decodeClip(binary)

@@ -29,10 +29,11 @@ bool fzmv_open(File* file, FzmvInfo* info, const char** error) {
     }
     const uint16_t version = read_u16(header + 4);
     const uint32_t flags = read_u32(header + 40);
-    const bool pcm_audio = version == 2 || (version == 3 && flags == 2);
-    if((version != 1 && version != 2 && version != 3) || read_u16(header + 6) != 64 ||
+    const bool pcm_audio = version == 2 || (version == 3 && flags == 2) ||
+                           (version == 4 && read_u32(header + 52) != 0);
+    if((version != 1 && version != 2 && version != 3 && version != 4) || read_u16(header + 6) != 64 ||
        read_u16(header + 8) != FZMV_WIDTH || read_u16(header + 10) != FZMV_HEIGHT ||
-       read_u16(header + 14) != (pcm_audio ? 0 : 20) ||
+       read_u16(header + 14) != (version == 4 ? 20 : pcm_audio ? 0 : 20) ||
        read_u32(header + 44) != actual_size) {
         *error = "Unsupported FZMV header";
         return false;
@@ -47,6 +48,7 @@ bool fzmv_open(File* file, FzmvInfo* info, const char** error) {
     info->frame_index_offset = read_u32(header + 24);
     info->frame_data_offset = read_u32(header + 28);
     info->audio_offset = read_u32(header + 32);
+    info->tone_offset = info->audio_offset;
     info->duration_ms = read_u32(header + 36);
     info->file_size = (uint32_t)actual_size;
     info->sample_count = 0;
@@ -67,7 +69,20 @@ bool fzmv_open(File* file, FzmvInfo* info, const char** error) {
         return false;
     }
 
-    if(!pcm_audio) {
+    if(version == 4) {
+        const uint64_t blocks = ((uint64_t)read_u32(header + 52) + 255u) / 256u;
+        const uint64_t tone_start = (uint64_t)info->audio_offset + blocks * 132u;
+        if(flags != 3 || header[62] != 0 || tone_start > actual_size ||
+           tone_start + (uint64_t)info->tick_count * 4u != actual_size ||
+           (pcm_audio && (read_u32(header + 48) != 16000 ||
+            read_u16(header + 56) != 1 || read_u16(header + 58) != 256 ||
+            read_u16(header + 60) != 132))) {
+            *error = "Damaged multitrack stream";
+            return false;
+        }
+        info->sample_count = read_u32(header + 52);
+        info->tone_offset = (uint32_t)tone_start;
+    } else if(!pcm_audio) {
         if(flags != (info->tick_count ? 1u : 0u) ||
            (uint64_t)info->audio_offset + info->tick_count * 4ull != actual_size) {
             *error = "Damaged tone stream";
@@ -204,9 +219,9 @@ void fzmv_to_display(const uint8_t frame[FZMV_FRAME_BYTES], uint8_t display[FZMV
 }
 
 bool fzmv_read_tone(File* file, const FzmvInfo* info, uint32_t index, FzmvTone* tone) {
-    if(info->pcm_audio || index >= info->tick_count) return false;
+    if((info->pcm_audio && info->version != 4) || index >= info->tick_count) return false;
     uint8_t data[4];
-    if(!read_exact(file, info->audio_offset + index * 4u, data, 4)) return false;
+    if(!read_exact(file, info->tone_offset + index * 4u, data, 4)) return false;
     tone->frequency = read_u16(data);
     tone->gain = data[2];
     tone->gate = data[3];
