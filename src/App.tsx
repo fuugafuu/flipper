@@ -6,8 +6,8 @@ import {
   Sparkles, UploadCloud, Volume2, Waves, X, Zap,
 } from 'lucide-react'
 import { convertMedia, type ConversionResult } from './lib/convert'
-import { frameToImageData, niceBytes } from './lib/format'
-import { playBuzzer, playPcm, type PlaybackHandle } from './lib/sound'
+import { decodeClip, frameToImageData, niceBytes } from './lib/format'
+import { playBuzzer, playPcm, type PcmPreviewMode, type PlaybackHandle } from './lib/sound'
 import { pcmWaveform, type PcmAudio } from './lib/pcm'
 import type { Settings } from './lib/vision'
 
@@ -54,6 +54,7 @@ function MiniWave({ audio, pcm }: { audio: { gain: number }[]; pcm?: PcmAudio })
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null)
+  const [imported, setImported] = useState(false)
   const [sourceUrl, setSourceUrl] = useState('')
   const [settings, setSettings] = useState<Settings>(initialSettings)
   const [result, setResult] = useState<ConversionResult | null>(null)
@@ -64,7 +65,10 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false)
   const [playing, setPlaying] = useState(false)
   const [position, setPosition] = useState(0)
+  const [audioPreviewMode, setAudioPreviewMode] = useState<PcmPreviewMode>('buzzer')
   const fileInput = useRef<HTMLInputElement>(null)
+  const fzmvInput = useRef<HTMLInputElement>(null)
+  const fileGeneration = useRef(0)
   const previewCanvas = useRef<HTMLCanvasElement>(null)
   const sourceMedia = useRef<HTMLMediaElement>(null)
   const abortController = useRef<AbortController | null>(null)
@@ -86,13 +90,13 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (!file) { setSourceUrl(''); return }
+    if (!file || imported) { setSourceUrl(''); return }
     const url = URL.createObjectURL(file)
     setSourceUrl(url)
     // Media elements can finish their pending range requests after unmount.
     // Keep the blob alive briefly so those requests are not served a revoked URL.
     return () => { window.setTimeout(() => URL.revokeObjectURL(url), 5000) }
-  }, [file])
+  }, [file, imported])
 
   useEffect(() => () => {
     abortController.current?.abort()
@@ -113,11 +117,13 @@ export default function App() {
 
   const chooseFile = (selected?: File) => {
     if (!selected) return
-    if (!selected.type.startsWith('video/') && !selected.type.startsWith('audio/') &&
+    const isFzmv = /\.fzmv$/i.test(selected.name)
+    if (!isFzmv && !selected.type.startsWith('video/') && !selected.type.startsWith('audio/') &&
       !/\.(mp4|mov|mkv|webm|avi|m4v|wav|mp3|ogg|m4a|flac|aac)$/i.test(selected.name)) {
-      setError('動画または音声ファイルを選択してください。')
+      setError('動画・音声ファイル、または変換済みの.fzmvを選択してください。')
       return
     }
+    const generation = ++fileGeneration.current
     stop()
     // Stop outstanding media fetches before releasing the previous source URL.
     if (sourceMedia.current) {
@@ -127,15 +133,31 @@ export default function App() {
     abortController.current?.abort()
     setWorking(false)
     setFile(selected)
+    setImported(isFzmv)
     setResult(null)
     setPosition(0)
     setProgress(0)
     setError('')
-    setStatus('')
+    setStatus(isFzmv ? 'FZMVを読み込んでいます' : '')
+    if (isFzmv) {
+      void selected.arrayBuffer().then(buffer => {
+        if (generation !== fileGeneration.current) return
+        const binary = new Uint8Array(buffer)
+        const decoded = decodeClip(binary)
+        if (generation !== fileGeneration.current) return
+        setResult({ clip: decoded, binary, warnings: [], sourceDuration: decoded.durationMs / 1000 })
+        setStatus('読み込み完了 · 再生できます')
+      }).catch(cause => {
+        if (generation !== fileGeneration.current) return
+        setError(cause instanceof Error ? cause.message : 'FZMVファイルを読み込めませんでした')
+        setStatus('')
+      })
+    }
   }
 
   const updateSettings = <K extends keyof Settings>(key: K, value: Settings[K]) => {
     setSettings(previous => ({ ...previous, [key]: value }))
+    if (imported) return
     if (result) {
       stop()
       setResult(null)
@@ -144,7 +166,7 @@ export default function App() {
   }
 
   const convert = async () => {
-    if (!file || working) return
+    if (!file || imported || working) return
     stop()
     setError('')
     setResult(null)
@@ -171,15 +193,13 @@ export default function App() {
     }
   }
 
-  const togglePlayback = () => {
+  const startPlayback = (startAt: number, previewMode: PcmPreviewMode) => {
     if (!clip) return
-    if (playing) { stop(); return }
-    let startAt = position >= duration - 0.02 ? 0 : position
     if (startAt === 0) setPosition(0)
     const generation = ++playGeneration.current
     try {
       let audio: PlaybackHandle | null = null
-      if (clip.pcm) audio = playPcm(clip.pcm, startAt)
+      if (clip.pcm) audio = playPcm(clip.pcm, startAt, previewMode)
       else if (clip.audio.some(tick => tick.frequency > 0 && tick.gain > 0)) audio = playBuzzer(clip.audio, startAt)
       if (generation !== playGeneration.current) { audio?.stop(); return }
       oscillator.current = audio
@@ -216,6 +236,20 @@ export default function App() {
       stop()
       setError(cause instanceof Error ? cause.message : 'プレビュー音声を開始できませんでした')
     }
+  }
+
+  const togglePlayback = () => {
+    if (!clip) return
+    if (playing) { stop(); return }
+    startPlayback(position >= duration - 0.02 ? 0 : position, audioPreviewMode)
+  }
+
+  const changeAudioPreviewMode = (mode: PcmPreviewMode) => {
+    if (mode === audioPreviewMode) return
+    const wasPlaying = playing
+    if (wasPlaying) stop()
+    setAudioPreviewMode(mode)
+    if (wasPlaying && clip?.pcm) startPlayback(position, mode)
   }
 
   const save = () => {
@@ -259,15 +293,18 @@ export default function App() {
         <aside className="left-column">
           <section className="panel upload-panel">
             <div className="panel-heading"><div className="panel-heading-left"><span className="step-label">01</span><h3>メディアを読み込む</h3></div><span className="panel-detail">INPUT</span></div>
-            <input ref={fileInput} type="file" hidden accept="video/*,audio/*,.mkv,.avi,.flac,.mov" onChange={event => { chooseFile(event.target.files?.[0]); event.target.value = '' }} />
+            <input ref={fileInput} type="file" hidden accept="video/*,audio/*,.mkv,.avi,.flac,.mov,.fzmv" onChange={event => { chooseFile(event.target.files?.[0]); event.target.value = '' }} />
+            <input ref={fzmvInput} type="file" hidden accept=".fzmv" onChange={event => { chooseFile(event.target.files?.[0]); event.target.value = '' }} />
             <button className={`drop-zone ${dragActive ? 'drag-active' : ''} ${file ? 'has-file' : ''}`} type="button" onClick={() => fileInput.current?.click()} onDragOver={event => { event.preventDefault(); setDragActive(true) }} onDragLeave={() => setDragActive(false)} onDrop={event => { event.preventDefault(); setDragActive(false); chooseFile(event.dataTransfer.files[0]) }}>
-              {file ? <><div className="drop-icon selected">{isVideo ? <FileVideo2 size={24} /> : <FileAudio2 size={24} />}</div><strong className="file-name">{file.name}</strong><span className="drop-secondary">{niceBytes(file.size)} <span className="dot-separator">·</span> クリックして変更</span><span className="file-indicator"><Check size={12} /> ファイル選択済み</span></> : <><div className="drop-icon"><UploadCloud size={27} strokeWidth={1.6} /></div><strong>ファイルをドロップ</strong><span className="drop-secondary">またはクリックしてファイルを選択</span><span className="file-types">MP4 / MOV / WEBM / MP3 / WAV / MORE</span></>}
+              {file ? <><div className="drop-icon selected">{imported ? <HardDrive size={24} /> : isVideo ? <FileVideo2 size={24} /> : <FileAudio2 size={24} />}</div><strong className="file-name">{file.name}</strong><span className="drop-secondary">{niceBytes(file.size)} <span className="dot-separator">·</span> クリックして変更</span><span className="file-indicator"><Check size={12} /> {imported ? '変換済みファイルを選択済み' : 'ファイル選択済み'}</span></> : <><div className="drop-icon"><UploadCloud size={27} strokeWidth={1.6} /></div><strong>ファイルをドロップ</strong><span className="drop-secondary">またはクリックしてファイルを選択</span><span className="file-types">MP4 / MOV / WEBM / MP3 / WAV / FZMV</span></>}
             </button>
-            <div className="upload-footnote"><Info size={14} /> 最後まで変換します。長い動画や高FPSは端末のメモリと処理時間が必要です。</div>
+            <button className="import-fzmv-button" type="button" onClick={() => fzmvInput.current?.click()}><HardDrive size={17} /> 変換済み .fzmv を開いて再生</button>
+            <div className="upload-footnote"><Info size={14} /> {imported ? 'FZMV v1／v2に対応。読み込んだ映像と音声を変換後プレビューで再生できます。' : '最後まで変換します。長い動画や高FPSは端末のメモリと処理時間が必要です。'}</div>
           </section>
 
           <section className="panel settings-panel">
             <div className="panel-heading"><div className="panel-heading-left"><span className="step-label">02</span><h3>変換パラメータ</h3></div><SlidersHorizontal size={17} className="dim-icon" /></div>
+            {imported ? <div className="imported-settings-note"><Check size={20} /><div><strong>{clip ? 'FZMVの読み込みが完了しました' : error ? 'FZMVの読み込みに失敗しました' : 'FZMVを読み込み中です'}</strong><p>{error || (clip ? '右側のプレビューで映像と音声を再生できます。ブザー推定音も試聴できます。' : '読み込みが終わるとプレビューに表示されます。')}</p></div></div> : <>
             <div className="settings-group-label"><Film size={15} /> VIDEO <span>映像設定</span></div>
             <div className="settings-selects">
               <ControlSelect label="フレームレート" value={settings.fps} choices={[6, 8, 10, 12, 15, 20, 24, 30, 40, 48, 60].map(value => ({ value, label: `${value} FPS` }))} onChange={value => updateSettings('fps', Number(value))} />
@@ -285,9 +322,10 @@ export default function App() {
             <div className="audio-hint"><Waves size={15} /><span>{settings.tone === 'pcm' ? '16kHzの音声波形を補正し、4bit IMA ADPCMで圧縮。楽器・声・リズムを保持します。実機PWM再生は次段階で検証します。' : '音楽を20msごとに単音化します。複数楽器や歌声は音程が飛びやすく、大幅に音質が低下します。'}</span></div>
             {working && <div className="progress-area" role="status"><div className="progress-head"><span>{status}</span><strong>{Math.round(progress * 100)}%</strong></div><div className="progress-track"><div style={{ width: `${progress * 100}%` }} /></div></div>}
             {error && <div className="error-box" role="alert"><CircleAlert size={16} />{error}</div>}
-            <button className={`convert-button ${working ? 'converting' : ''}`} onClick={() => { if (working) abortController.current?.abort(); else void convert() }} disabled={!file && !working}>
-              {working ? <><X size={17} /> 変換を中止する <span>{Math.round(progress * 100)}%</span></> : <><Zap size={18} fill="currentColor" /> {result ? '設定を変更して再変換' : '変換を開始する'} <ArrowRight size={18} className="button-arrow" /></>}
+            <button className={`convert-button ${working ? 'converting' : ''}`} onClick={() => { if (working) abortController.current?.abort(); else void convert() }} disabled={imported || (!file && !working)}>
+              {imported ? <><Check size={18} /> {clip ? 'FZMV読込完了 · 右側で再生' : status || 'FZMVを確認中'}</> : working ? <><X size={17} /> 変換を中止する <span>{Math.round(progress * 100)}%</span></> : <><Zap size={18} fill="currentColor" /> {result ? '設定を変更して再変換' : '変換を開始する'} <ArrowRight size={18} className="button-arrow" /></>}
             </button>
+            </>}
           </section>
         </aside>
 
@@ -295,9 +333,9 @@ export default function App() {
           <div className="panel preview-panel">
             <div className="panel-heading preview-heading"><div className="panel-heading-left"><span className="step-label">03</span><h3>リアルタイムプレビュー</h3></div><span className="preview-status"><span className={`status-light ${clip ? 'ready' : ''}`} />{clip ? 'READY TO PLAY' : 'AWAITING INPUT'}</span></div>
             <div className="preview-grid">
-              <div className="preview-section"><div className="preview-label"><span>ORIGINAL</span><span>変換前</span></div>
-                <div className="source-stage">{sourceUrl ? (isVideo ? <video key={sourceUrl} ref={element => { sourceMedia.current = element }} controls playsInline preload="metadata" src={sourceUrl} /> : <div className="audio-source"><div className="audio-disc"><AudioLines size={46} /></div><span>ORIGINAL AUDIO</span><audio key={sourceUrl} ref={element => { sourceMedia.current = element }} controls preload="metadata" src={sourceUrl} /></div>) : <div className="empty-source"><Film size={35} strokeWidth={1.3} /><span>メディアを選択すると表示されます</span></div>}</div>
-                <div className="preview-caption"><span><span className="caption-pip" /> SOURCE FILE</span><span>{file ? niceBytes(file.size) : '—'}</span></div>
+              <div className="preview-section"><div className="preview-label"><span>{imported ? 'IMPORTED FZMV' : 'ORIGINAL'}</span><span>{imported ? '読込ファイル' : '変換前'}</span></div>
+                <div className="source-stage">{imported ? <div className="empty-source imported-source"><HardDrive size={35} strokeWidth={1.3} /><span>{clip ? '変換済みデータを読み込みました' : error ? 'FZMVを読み込めませんでした' : 'FZMVを読み込み中'}</span><small>{clip ? '右側で映像と音声を再生できます' : error || 'ファイルを解析しています'}</small></div> : sourceUrl ? (isVideo ? <video key={sourceUrl} ref={element => { sourceMedia.current = element }} controls playsInline preload="metadata" src={sourceUrl} /> : <div className="audio-source"><div className="audio-disc"><AudioLines size={46} /></div><span>ORIGINAL AUDIO</span><audio key={sourceUrl} ref={element => { sourceMedia.current = element }} controls preload="metadata" src={sourceUrl} /></div>) : <div className="empty-source"><Film size={35} strokeWidth={1.3} /><span>メディアを選択すると表示されます</span></div>}</div>
+                <div className="preview-caption"><span><span className="caption-pip" /> {imported ? 'FZMV FILE' : 'SOURCE FILE'}</span><span>{file ? niceBytes(file.size) : '—'}</span></div>
               </div>
               <div className="preview-section converted-section"><div className="preview-label"><span>FLIPPER ZERO <span className="orange-badge">SIMULATED</span></span><span>変換後</span></div>
                 <div className="device-stage"><div className="stage-glow" /><div className="flipper-device"><div className="device-upper"><div className="device-display"><div className="display-inner">{clip ? <canvas ref={previewCanvas} width="128" height="64" aria-label="128×64 変換済みプレビュー" /> : <div className="display-idle"><span className="display-idle-icon">▦</span><span>NO SIGNAL</span><i>128 × 64 PX</i></div>}</div></div><div className="device-brand">FLIPFRAME <span>MONO LCD</span></div></div><div className="device-lower"><div className="device-round-button" /><div className="device-dpad"><span>▲</span><span>◀</span><span className="dpad-center">●</span><span>▶</span><span>▼</span></div><div className="device-back-button">↶</div></div></div></div>
@@ -305,19 +343,29 @@ export default function App() {
               </div>
             </div>
 
-            <div className="transport"><div className="transport-top"><div className="transport-name"><MonitorPlay size={16} /> CONVERTED PLAYBACK <span>映像・音声同期</span></div><span className="transport-time">{formatTime(position)} <span>/</span> {formatTime(duration)}</span></div>
+            <div className="transport"><div className="transport-top"><div className="transport-name"><MonitorPlay size={16} /> {imported ? 'IMPORTED FZMV PLAYBACK' : 'CONVERTED PLAYBACK'} <span>映像・音声同期</span></div><span className="transport-time">{formatTime(position)} <span>/</span> {formatTime(duration)}</span></div>
+              {clip?.pcm && <div className="audio-preview-control">
+                <div className="audio-preview-header"><Volume2 size={14} /><span>音声プレビュー方式</span></div>
+                <div className="audio-preview-buttons" role="group" aria-label="音声プレビュー方式">
+                  <button type="button" className={audioPreviewMode === 'buzzer' ? 'active' : ''} aria-pressed={audioPreviewMode === 'buzzer'} onClick={() => changeAudioPreviewMode('buzzer')}>ブザー推定音</button>
+                  <button type="button" className={audioPreviewMode === 'data' ? 'active' : ''} aria-pressed={audioPreviewMode === 'data'} onClick={() => changeAudioPreviewMode('data')}>音声データの音</button>
+                </div>
+                <p aria-live="polite">{audioPreviewMode === 'buzzer'
+                  ? '圧電ブザーの帯域制限・共振・ひずみを仮定した推定音です。実機未測定のため、音質と音量は保証できません。'
+                  : 'FZMVのADPCM音声を復号して再生します。スマホやPCのスピーカーでは実機より良く聞こえます。'}</p>
+              </div>}
               <div className="transport-bottom"><button className="play-button" disabled={!clip} aria-label={playing ? '一時停止' : '再生'} onClick={() => void togglePlayback()}>{playing ? <Pause size={19} fill="currentColor" /> : <Play size={19} fill="currentColor" />}</button><input type="range" className="timeline" aria-label="再生位置" disabled={!clip} min={0} max={Math.max(0.01, duration)} step={0.02} value={position} onChange={event => { stop(); setPosition(Number(event.target.value)) }} style={{ '--seek-progress': `${duration ? position / duration * 100 : 0}%` } as React.CSSProperties} /><button className="replay-button" aria-label="先頭に戻る" disabled={!clip} onClick={() => { stop(); setPosition(0) }}><RotateCcw size={18} /></button></div>
               <div className="transport-wave"><MiniWave audio={clip?.audio || []} pcm={clip?.pcm} /><div className="transport-footnote"><Volume2 size={14} /> {clip && !clip.pcm && !clip.audio.some(tick => tick.frequency && tick.gain) ? 'この変換結果に再生可能な音声はありません。元の動画から再変換してください。' : 'スマホでは再生ボタンを押して音声を有効にしてください'}</div></div>
             </div>
           </div>
 
-          <div className="panel export-panel"><div className="export-content"><div className="export-icon"><HardDrive size={22} /></div><div className="export-copy"><span className="export-eyebrow">OUTPUT FILE / .FZMV</span><h3>{clip ? '変換が完了しました' : '書き出しの準備ができています'}</h3><p>{clip ? `${clip.frames.length}フレーム · ${clip.pcm ? '16kHz ADPCM音声' : `${clip.audio.length}単音ステップ`} · ${niceBytes(result!.binary.length)}` : '変換するとFlipper Zero向け独自ファイルをダウンロードできます。'}</p></div></div><button className="download-button" disabled={!clip} onClick={save}><ArrowDownToLine size={18} /> ダウンロード</button></div>
+          <div className="panel export-panel"><div className="export-content"><div className="export-icon"><HardDrive size={22} /></div><div className="export-copy"><span className="export-eyebrow">{imported ? 'IMPORTED FILE / .FZMV' : 'OUTPUT FILE / .FZMV'}</span><h3>{clip ? imported ? 'FZMVを読み込みました' : '変換が完了しました' : '書き出しの準備ができています'}</h3><p>{clip ? `${clip.frames.length}フレーム · ${clip.pcm ? '16kHz ADPCM音声' : `${clip.audio.length}単音ステップ`} · ${niceBytes(result!.binary.length)}` : '変換するとFlipper Zero向け独自ファイルをダウンロードできます。'}</p></div></div><button className="download-button" disabled={!clip} onClick={save}><ArrowDownToLine size={18} /> ダウンロード</button></div>
           {result?.warnings.map((warning, i) => <div className="notice notice-warn" key={i}><CircleAlert size={16} /> {warning}</div>)}
-          <div className="spec-grid"><div className="spec"><span className="spec-icon"><MonitorPlay size={18} /></span><span>DISPLAY</span><strong>128 × 64</strong><small>MONOCHROME LCD</small></div><div className="spec"><span className="spec-icon"><Activity size={18} /></span><span>AUDIO</span><strong>{settings.tone === 'pcm' ? '16k' : '100–2500'} <i>Hz</i></strong><small>{settings.tone === 'pcm' ? '4-BIT IMA ADPCM' : 'SINGLE TONE'}</small></div><div className="spec"><span className="spec-icon"><Clock3 size={18} /></span><span>FRAME RATE</span><strong>{settings.fps} <i>FPS</i></strong><small>CONFIGURABLE</small></div></div>
+          <div className="spec-grid"><div className="spec"><span className="spec-icon"><MonitorPlay size={18} /></span><span>DISPLAY</span><strong>128 × 64</strong><small>MONOCHROME LCD</small></div><div className="spec"><span className="spec-icon"><Activity size={18} /></span><span>AUDIO</span><strong>{(imported && clip ? Boolean(clip.pcm) : settings.tone === 'pcm') ? '16k' : '100–2500'} <i>Hz</i></strong><small>{(imported && clip ? Boolean(clip.pcm) : settings.tone === 'pcm') ? '4-BIT IMA ADPCM' : 'SINGLE TONE'}</small></div><div className="spec"><span className="spec-icon"><Clock3 size={18} /></span><span>FRAME RATE</span><strong>{imported && clip ? clip.fps : settings.fps} <i>FPS</i></strong><small>{imported && clip ? 'IMPORTED FILE' : 'CONFIGURABLE'}</small></div></div>
         </section>
       </div>
 
-      <div className="bottom-info"><span className="info-icon"><Sparkles size={19} /></span><div><strong>実機再生に向けたプロトタイプ形式</strong><p>高音質モードはFZMV v2（16kHz・4bit ADPCM音声）を生成します。既存の単音モードはv1形式です。Flipper ZeroにはPCM再生アプリの実装例がありますが、今回の独自形式を再生する実機アプリは未実装です。ブラウザの音は圧電ブザーの帯域を近似したもので、実機の音量や音質、60 FPSとの同時動作は未検証です。</p></div></div>
+      <div className="bottom-info"><span className="info-icon"><Sparkles size={19} /></span><div><strong>実機再生に向けたプロトタイプ形式</strong><p>高音質モードはFZMV v2（16kHz・4bit ADPCM音声）を生成します。既存の単音モードはv1形式です。Flipper ZeroにはPCM再生アプリの実装例がありますが、今回の独自形式を再生する実機アプリは未実装です。音声プレビューの「ブザー推定音」は周波数帯域などを仮定した試聴用の音で、実機音響特性に基づく校正はしていません。実機の音質・音量や60 FPSでの同時再生は未検証です。</p></div></div>
     </main>
     <footer className="footer"><span className="footer-brand">FLIPFRAME<span> / STUDIO</span></span><span>ENGINE V1.0 <span className="footer-dot">◆</span> LOCAL MEDIA CONVERSION</span><span>BUILT FOR THE TINIEST SCREEN.</span></footer>
   </div>

@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
-import { trackBuzzer } from './sound'
+import { describe, expect, it, vi } from 'vitest'
+import { playPcm, trackBuzzer } from './sound'
+import { encodeAdpcm } from './pcm'
 import type { Settings } from './vision'
 
 const settings: Settings = {
@@ -53,5 +54,60 @@ describe('buzzer sound tracking', () => {
   it('does not invent buzzer events from silence', async () => {
     const ticks = await convertAudio(makeBuffer(0.5, () => 0))
     expect(ticks.every(tick => tick.frequency === 0 && tick.gain === 0)).toBe(true)
+  })
+})
+
+describe('PCM preview modes', () => {
+  it('only colors audio in buzzer mode, without changing the encoded FZMV data', () => {
+    const filters: Array<{ type: string; frequency: { value: number } }> = []
+    const waveshapers: Array<{ curve: Float32Array | null }> = []
+    const node = () => ({ connect(next: unknown) { return next } })
+
+    class TestAudioContext {
+      currentTime = 0
+      destination = node()
+      resume = async () => {}
+      close = async () => {}
+      createBuffer(_channels: number, size: number, rate: number) {
+        return { duration: size / rate, copyToChannel(_samples: Float32Array) {} }
+      }
+      createBufferSource() {
+        return { ...node(), buffer: null, start(_time: number, _offset: number) {}, stop() {} }
+      }
+      createBiquadFilter() {
+        const filter = { ...node(), type: '', frequency: { value: 0 }, Q: { value: 0 }, gain: { value: 0 } }
+        filters.push(filter)
+        return filter
+      }
+      createWaveShaper() {
+        const shaper = { ...node(), curve: null as Float32Array | null, oversample: 'none' }
+        waveshapers.push(shaper)
+        return shaper
+      }
+      createGain() { return { ...node(), gain: { value: 0 } } }
+    }
+
+    vi.stubGlobal('AudioContext', TestAudioContext)
+    try {
+      const pcm = encodeAdpcm(Int16Array.from({ length: 1600 }, (_, i) => Math.round(Math.sin(i * 0.15) * 12000)))
+      const originalBytes = pcm.data.slice()
+      const estimated = playPcm(pcm, 0)
+      expect(filters.map(filter => [filter.type, filter.frequency.value])).toEqual([
+        ['highpass', 450], ['peaking', 1550], ['lowpass', 2300],
+      ])
+      expect(waveshapers).toHaveLength(1)
+      expect(waveshapers[0].curve).toHaveLength(1025)
+      estimated.stop()
+
+      filters.length = 0
+      waveshapers.length = 0
+      const direct = playPcm(pcm, 0, 'data')
+      expect(filters).toHaveLength(0)
+      expect(waveshapers).toHaveLength(0)
+      expect(pcm.data).toEqual(originalBytes)
+      direct.stop()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

@@ -191,10 +191,11 @@ export async function decodeAudio(file: File, notify: (text: string) => void): P
 }
 
 export type PlaybackHandle = { context: AudioContext; start: number; stop: () => void }
+export type PcmPreviewMode = 'buzzer' | 'data'
 
 const pcmCache = new WeakMap<Uint8Array, Float32Array>()
 
-export function playPcm(pcm: PcmAudio, offsetSeconds: number): PlaybackHandle {
+export function playPcm(pcm: PcmAudio, offsetSeconds: number, mode: PcmPreviewMode = 'buzzer'): PlaybackHandle {
   const context = new AudioContext()
   void context.resume().catch(() => { /* The UI detects a suspended context. */ })
   let samples = pcmCache.get(pcm.data)
@@ -207,15 +208,42 @@ export function playPcm(pcm: PcmAudio, offsetSeconds: number): PlaybackHandle {
   buffer.copyToChannel(samples, 0)
   const source = context.createBufferSource()
   source.buffer = buffer
-  const highpass = context.createBiquadFilter()
-  highpass.type = 'highpass'
-  highpass.frequency.value = 300
-  const lowpass = context.createBiquadFilter()
-  lowpass.type = 'lowpass'
-  lowpass.frequency.value = 4600
   const gain = context.createGain()
-  gain.gain.value = 0.7
-  source.connect(highpass).connect(lowpass).connect(gain).connect(context.destination)
+  if (mode === 'buzzer') {
+    // The Flipper's 100–2500 Hz buzzer rating is not a measured response curve.
+    // These filters and soft distortion are a deliberately uncalibrated estimate.
+    const highpass = context.createBiquadFilter()
+    highpass.type = 'highpass'
+    highpass.frequency.value = 450
+    highpass.Q.value = Math.SQRT1_2
+
+    const resonance = context.createBiquadFilter()
+    resonance.type = 'peaking'
+    resonance.frequency.value = 1550
+    resonance.Q.value = 1.15
+    resonance.gain.value = 5
+
+    const lowpass = context.createBiquadFilter()
+    lowpass.type = 'lowpass'
+    lowpass.frequency.value = 2300
+    lowpass.Q.value = Math.SQRT1_2
+
+    const distortion = context.createWaveShaper()
+    const curve = new Float32Array(1025)
+    for (let i = 0; i < curve.length; i++) {
+      const x = (i / (curve.length - 1)) * 2 - 1
+      curve[i] = Math.tanh(1.7 * x) / Math.tanh(1.7)
+    }
+    distortion.curve = curve
+    distortion.oversample = '2x'
+    gain.gain.value = 0.37
+    source.connect(highpass).connect(distortion).connect(resonance).connect(lowpass).connect(gain)
+  } else {
+    // Reference monitor: decoded ADPCM data with no speaker-response EQ.
+    gain.gain.value = 0.7
+    source.connect(gain)
+  }
+  gain.connect(context.destination)
   const start = context.currentTime + 0.06
   source.start(start, Math.min(offsetSeconds, Math.max(0, buffer.duration - 0.005)))
   return {
