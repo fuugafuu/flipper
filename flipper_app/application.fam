@@ -1,0 +1,9 @@
+App(
+    appid="fzmv_player",
+    name="FZMV Player",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="fzmv_player_app",
+    requires=["gui", "storage", "dialogs"],
+    stack_size=8192,
+    fap_category="Media",
+)

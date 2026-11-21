@@ -8,3 +8,5 @@ public/ffmpeg/
 *.tsbuildinfo
 
 .vercel
+flipper_app/.vscode/
+flipper_app/dist/
