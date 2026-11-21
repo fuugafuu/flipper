@@ -172,7 +172,7 @@ export default function App() {
     }
   }
 
-  const togglePlayback = async () => {
+  const togglePlayback = () => {
     if (!clip) return
     if (playing) { stop(); return }
     let startAt = position >= duration - 0.02 ? 0 : position
@@ -180,7 +180,7 @@ export default function App() {
     const generation = ++playGeneration.current
     try {
       let audio: PlaybackHandle | null = null
-      if (clip.audio.length) audio = await playBuzzer(clip.audio, startAt)
+      if (clip.audio.some(tick => tick.frequency > 0 && tick.gain > 0)) audio = playBuzzer(clip.audio, startAt)
       if (generation !== playGeneration.current) { audio?.stop(); return }
       oscillator.current = audio
       const startedAt = performance.now() + (audio ? 60 : 0)
@@ -188,11 +188,20 @@ export default function App() {
         try {
           sourceMedia.current.currentTime = startAt
           sourceMedia.current.muted = true
-          await sourceMedia.current.play()
+          // Media playback promises may remain pending on mobile Safari.
+          // Let the converted preview clock and buzzer start immediately.
+          void sourceMedia.current.play().catch(() => { /* Original media is optional. */ })
         } catch { /* Source playback isn't required for decoded preview. */ }
       }
       if (generation !== playGeneration.current) { audio?.stop(); return }
       setPlaying(true)
+      if (audio) {
+        window.setTimeout(() => {
+          if (generation === playGeneration.current && audio.context.state !== 'running') {
+            setError('ブラウザが音声を停止しています。端末の音量を上げ、再生ボタンをもう一度押してください。')
+          }
+        }, 900)
+      }
       let lastRendered = -1
       const tick = () => {
         if (generation !== playGeneration.current) return
@@ -298,7 +307,7 @@ export default function App() {
 
             <div className="transport"><div className="transport-top"><div className="transport-name"><MonitorPlay size={16} /> CONVERTED PLAYBACK <span>映像・ブザー同期</span></div><span className="transport-time">{formatTime(position)} <span>/</span> {formatTime(duration)}</span></div>
               <div className="transport-bottom"><button className="play-button" disabled={!clip} aria-label={playing ? '一時停止' : '再生'} onClick={() => void togglePlayback()}>{playing ? <Pause size={19} fill="currentColor" /> : <Play size={19} fill="currentColor" />}</button><input type="range" className="timeline" aria-label="再生位置" disabled={!clip} min={0} max={Math.max(0.01, duration)} step={0.02} value={position} onChange={event => { stop(); setPosition(Number(event.target.value)) }} style={{ '--seek-progress': `${duration ? position / duration * 100 : 0}%` } as React.CSSProperties} /><button className="replay-button" aria-label="先頭に戻る" disabled={!clip} onClick={() => { stop(); setPosition(0) }}><RotateCcw size={18} /></button></div>
-              <div className="transport-wave"><MiniWave audio={clip?.audio || []} /><div className="transport-footnote"><Volume2 size={14} /> ブラウザの音量に注意してください</div></div>
+              <div className="transport-wave"><MiniWave audio={clip?.audio || []} /><div className="transport-footnote"><Volume2 size={14} /> {clip && !clip.audio.some(tick => tick.frequency && tick.gain) ? 'この変換結果に再生可能なブザー音声はありません。元の動画から再変換してください。' : 'スマホでは再生ボタンを押して音声を有効にしてください'}</div></div>
             </div>
           </div>
 

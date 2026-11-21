@@ -44,8 +44,21 @@ function waveformSamples(buffer: AudioBuffer, duration: number): Float32Array {
     const base = Math.floor(position)
     const fraction = position - base
     for (const channel of channels) {
-      const first = channel[base] || 0
-      samples[i] += (first + ((channel[base + 1] || first) - first) * fraction) / channels.length
+      if (ratio > 1.5) {
+        // Integrate the source interval before downsampling. Point sampling aliases
+        // cymbals and consonants into false pitches on typical 44.1/48 kHz files.
+        const end = Math.min(channel.length, Math.ceil(position + ratio))
+        let sum = 0
+        let weight = 0
+        for (let source = base; source < end; source++) {
+          const overlap = Math.min(position + ratio, source + 1) - Math.max(position, source)
+          if (overlap > 0) { sum += (channel[source] || 0) * overlap; weight += overlap }
+        }
+        samples[i] += (weight ? sum / weight : 0) / channels.length
+      } else {
+        const first = channel[base] || 0
+        samples[i] += (first + ((channel[base + 1] || first) - first) * fraction) / channels.length
+      }
     }
   }
   return samples
@@ -60,8 +73,7 @@ export async function trackBuzzer(buffer: AudioBuffer, seconds: number, settings
   const window = new Float32Array(FFT_SIZE)
   for (let i = 0; i < FFT_SIZE; i++) window[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (FFT_SIZE - 1))
 
-  const candidates: { pitch: number; rms: number; confidence: number }[] = []
-  let maxRms = 0
+  const candidates: { pitch: number; rms: number }[] = []
   let previousPitch = 0
   for (let tick = 0; tick < tickCount; tick++) {
     if (signal.aborted) throw new DOMException('変換を中止しました', 'AbortError')
@@ -74,12 +86,9 @@ export async function trackBuzzer(buffer: AudioBuffer, seconds: number, settings
       power += sample * sample
     }
     const rms = Math.sqrt(power / FFT_SIZE)
-    maxRms = Math.max(maxRms, rms)
     fft(real, imaginary)
-    let spectrumEnergy = 0
     for (let i = 0; i < magnitudes.length; i++) {
       magnitudes[i] = Math.hypot(real[i], imaginary[i])
-      spectrumEnergy += magnitudes[i]
     }
 
     const minFrequency = settings.tone === 'voice' ? 125 : 105
@@ -106,25 +115,34 @@ export async function trackBuzzer(buffer: AudioBuffer, seconds: number, settings
     const denominator = left - 2 * middle + right
     const correction = Math.abs(denominator) > 1e-6 ? Math.max(-0.5, Math.min(0.5, 0.5 * (left - right) / denominator)) : 0
     const pitch = Math.round((bestBin + correction) * SAMPLE_RATE / FFT_SIZE)
-    const confidence = bestScore / Math.max(0.0001, spectrumEnergy)
-    candidates.push({ pitch, rms, confidence })
-    if (confidence > 0.07 && rms > 0.005) previousPitch = pitch
+    candidates.push({ pitch, rms })
+    if (rms > 0.0002) previousPitch = pitch
     if (tick % 64 === 0) {
       onProgress(tick / Math.max(1, tickCount))
       await new Promise(resolve => setTimeout(resolve, 0))
     }
   }
 
+  // A robust loudness reference ignores isolated drum hits. The old confidence
+  // threshold divided one note by the energy of *all* instruments and erased
+  // almost every note in mixed music.
+  const sortedRms = candidates.map(candidate => candidate.rms).sort((a, b) => a - b)
+  const reference = sortedRms[Math.floor((sortedRms.length - 1) * 0.95)] || 0
+  const gateThreshold = Math.max(0.0001, reference * 0.018)
   let smoothGain = 0
   let smoothPitch = 0
-  const gateThreshold = Math.max(0.003, maxRms * 0.045)
-  const ticks = candidates.map(candidate => {
-    const active = candidate.rms > gateThreshold && candidate.confidence > 0.055
-    const targetGain = active ? Math.min(255, Math.round(Math.pow(candidate.rms / Math.max(0.01, maxRms * 0.72), 0.72) * 255)) : 0
-    smoothGain += (targetGain - smoothGain) * (targetGain > smoothGain ? 0.58 : 0.32)
+  const ticks = candidates.map((candidate, index) => {
+    const active = candidate.rms > gateThreshold
+    const targetGain = active ? Math.min(255, Math.round(Math.pow(candidate.rms / Math.max(0.0001, reference), 0.55) * 220)) : 0
+    smoothGain += (targetGain - smoothGain) * (targetGain > smoothGain ? 0.7 : 0.48)
     if (active) {
-      smoothPitch = smoothPitch && Math.abs(Math.log2(candidate.pitch / smoothPitch)) < 0.11
-        ? smoothPitch * 0.55 + candidate.pitch * 0.45 : candidate.pitch
+      // Reject one-frame octave/glitch jumps but keep real note changes.
+      const next = candidates[index + 1]
+      const jump = smoothPitch > 0 ? Math.abs(12 * Math.log2(candidate.pitch / smoothPitch)) : 0
+      const nextSupports = next && Math.abs(12 * Math.log2(next.pitch / candidate.pitch)) < 3
+      const stablePitch = jump > 8 && !nextSupports ? smoothPitch : candidate.pitch
+      smoothPitch = smoothPitch && Math.abs(12 * Math.log2(stablePitch / smoothPitch)) < 2
+        ? smoothPitch * 0.4 + stablePitch * 0.6 : stablePitch
     }
     return {
       frequency: smoothGain < 9 || !active ? 0 : Math.max(100, Math.min(2500, Math.round(smoothPitch))),
@@ -173,9 +191,11 @@ export async function decodeAudio(file: File, notify: (text: string) => void): P
 
 export type PlaybackHandle = { context: AudioContext; start: number; stop: () => void }
 
-export async function playBuzzer(ticks: BuzzerTick[], offsetSeconds: number): Promise<PlaybackHandle> {
+export function playBuzzer(ticks: BuzzerTick[], offsetSeconds: number): PlaybackHandle {
   const context = new AudioContext()
-  await context.resume()
+  // iOS Safari requires resume() and oscillator.start() inside the same tap.
+  // Never await a media play promise before starting the audio graph.
+  void context.resume().catch(() => { /* The UI detects a suspended context. */ })
   const oscillator = context.createOscillator()
   oscillator.type = 'square'
   const gain = context.createGain()
@@ -194,10 +214,10 @@ export async function playBuzzer(ticks: BuzzerTick[], offsetSeconds: number): Pr
       const time = Math.max(start, start + nextTick * AUDIO_TICK_MS / 1000 - offsetSeconds)
       if (time > horizon) break
       const tick = ticks[nextTick++]
-      oscillator.frequency.setValueAtTime(Math.max(100, tick.frequency || 440), time)
+      oscillator.frequency.setTargetAtTime(Math.max(100, tick.frequency || 440), time, 0.003)
       const volume = tick.frequency ? Math.pow(tick.gain / 255, 1.15) * 0.14 : 0
-      gain.gain.setValueAtTime(volume, time)
-      if (tick.gate < 100) gain.gain.setValueAtTime(0, time + AUDIO_TICK_MS / 1000 * tick.gate / 100)
+      gain.gain.setTargetAtTime(volume, time, 0.003)
+      if (tick.gate < 100) gain.gain.setTargetAtTime(0, time + AUDIO_TICK_MS / 1000 * tick.gate / 100, 0.002)
     }
     if (nextTick >= ticks.length) clearInterval(timer)
   }
