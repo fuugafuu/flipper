@@ -2,6 +2,7 @@ import { decodeClip, encodeClip, type FlipperClip, type BuzzerTick } from './for
 import { audioArtwork, convertImage, renderSource, type Settings } from './vision'
 import { decodeAudio, trackBuzzer } from './sound'
 import { pcmWaveform, preparePcm, type PcmAudio } from './pcm'
+import { decodeVideoFrames } from './videoFrames'
 
 export type ConversionResult = {
   clip: FlipperClip
@@ -97,26 +98,50 @@ export async function convertMedia(
     // All three playback options share the same video frames and a single tone stream.
     const count = Math.max(1, Math.ceil(duration * settings.fps))
     let previous: Uint8Array | undefined
-    const toneState = {}
+    let toneState = {}
     const audioLevels = pcm ? pcmWaveform(pcm, Math.max(1, count)) : undefined
 
-    for (let i = 0; i < count; i++) {
+    const storeFrame = async (i: number, image: ImageData, region?: ReturnType<typeof renderSource>) => {
       abortIfNeeded(signal)
-      const seconds = i / settings.fps
-      let region
-      if (video) {
-        await seek(video, Math.min(seconds, Math.max(0, sourceDuration - 0.02)), signal)
-        region = renderSource(context, video, video.videoWidth, video.videoHeight, settings.fit)
-      } else {
-        const tick = audio[Math.min(audio.length - 1, Math.floor(seconds * 1000 / 20))]
-        audioArtwork(context, count <= 1 ? 0 : i / (count - 1), audioLevels ? audioLevels[i] / 255 : tick ? tick.gain / 255 : 0)
-      }
-      const frame = convertImage(context.getImageData(0, 0, 128, 64), settings, previous, region, toneState)
+      const frame = convertImage(image, settings, previous, region, toneState)
       frames.push(frame)
       previous = frame
-      if (i % 5 === 0 || i === count - 1) {
+      if (i % 12 === 0 || i === count - 1) {
         onProgress(0.43 + ((i + 1) / count) * 0.54, `フレームを最適化中 · ${i + 1} / ${count}`)
         await new Promise(resolve => setTimeout(resolve, 0))
+      }
+    }
+
+    let decodedFast = false
+    if (video) {
+      try {
+        onProgress(0.43, '高速映像デコーダーを準備しています')
+        await decodeVideoFrames(file, duration, settings, video.videoWidth, video.videoHeight, signal, storeFrame)
+        decodedFast = frames.length === count
+      } catch (error) {
+        abortIfNeeded(signal)
+        console.warn('Fast video decoding unavailable:', error)
+      }
+      if (!decodedFast) {
+        frames.length = 0
+        previous = undefined
+        toneState = {}
+        onProgress(0.43, 'ブラウザの動画デコーダーで変換しています')
+      }
+    }
+    if (!decodedFast) {
+      for (let i = 0; i < count; i++) {
+        abortIfNeeded(signal)
+        const seconds = i / settings.fps
+        let region
+        if (video) {
+          await seek(video, Math.min(seconds, Math.max(0, sourceDuration - 0.02)), signal)
+          region = renderSource(context, video, video.videoWidth, video.videoHeight, settings.fit)
+        } else {
+          const tick = audio[Math.min(audio.length - 1, Math.floor(seconds * 1000 / 20))]
+          audioArtwork(context, count <= 1 ? 0 : i / (count - 1), audioLevels ? audioLevels[i] / 255 : tick ? tick.gain / 255 : 0)
+        }
+        await storeFrame(i, context.getImageData(0, 0, 128, 64), region)
       }
     }
 

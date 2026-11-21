@@ -58,4 +58,19 @@ describe('1-bit image conversion', () => {
     convertImage(makeImage(x => x / 127 * 250), settings, undefined, undefined, state)
     expect(state.gain).toBeLessThan(2)
   })
+
+  it('does not retain moving edges when flicker stabilization is enabled', () => {
+    const stable = { ...settings, stability: 100 }
+    const previousImage = makeImage(x => x >= 30 && x < 45 ? 170 : 80)
+    const nextImage = makeImage(x => x >= 50 && x < 65 ? 170 : 80)
+    const state: ToneState = {}
+    const first = convertImage(previousImage, stable, undefined, undefined, state)
+    const moving = convertImage(nextImage, stable, first, undefined, state)
+    const fresh = convertImage(nextImage, stable)
+    for (let y = 8; y < 56; y++) {
+      for (let x = 27; x < 68; x++) {
+        expect(dark(moving, x, y)).toBe(dark(fresh, x, y))
+      }
+    }
+  })
 })
