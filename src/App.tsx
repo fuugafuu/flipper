@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, ArrowDownToLine, ArrowRight, AudioLines, Check, ChevronDown,
   CircleAlert, Clock3, Cpu, FileAudio2, FileVideo2, Film, HardDrive,
@@ -7,12 +7,13 @@ import {
 } from 'lucide-react'
 import { convertMedia, type ConversionResult } from './lib/convert'
 import { frameToImageData, niceBytes } from './lib/format'
-import { playBuzzer, type PlaybackHandle } from './lib/sound'
+import { playBuzzer, playPcm, type PlaybackHandle } from './lib/sound'
+import { pcmWaveform, type PcmAudio } from './lib/pcm'
 import type { Settings } from './lib/vision'
 
 const initialSettings: Settings = {
   fps: 10, dither: 'atkinson', contrast: 1.2,
-  detail: 40, stability: 40, fit: 'contain', tone: 'melody',
+  detail: 40, stability: 40, fit: 'contain', tone: 'pcm',
 }
 
 function formatTime(seconds: number): string {
@@ -43,13 +44,11 @@ function ControlSelect({ label, value, choices, onChange }: {
   </label>
 }
 
-function MiniWave({ audio }: { audio: { gain: number }[] }) {
+function MiniWave({ audio, pcm }: { audio: { gain: number }[]; pcm?: PcmAudio }) {
+  const levels = useMemo(() => pcm ? pcmWaveform(pcm) : Array.from({ length: 62 }, (_, i) =>
+    audio[Math.floor(i / 62 * audio.length)]?.gain ?? 0), [audio, pcm])
   return <div className="waveform" aria-hidden="true">
-    {Array.from({ length: 62 }, (_, i) => {
-      const tick = audio[Math.floor(i / 62 * audio.length)]
-      const value = tick?.gain ?? 0
-      return <span key={i} style={{ height: `${10 + value / 255 * 85}%` }} />
-    })}
+    {levels.map((value, i) => <span key={i} style={{ height: `${10 + value / 255 * 85}%` }} />)}
   </div>
 }
 
@@ -180,7 +179,8 @@ export default function App() {
     const generation = ++playGeneration.current
     try {
       let audio: PlaybackHandle | null = null
-      if (clip.audio.some(tick => tick.frequency > 0 && tick.gain > 0)) audio = playBuzzer(clip.audio, startAt)
+      if (clip.pcm) audio = playPcm(clip.pcm, startAt)
+      else if (clip.audio.some(tick => tick.frequency > 0 && tick.gain > 0)) audio = playBuzzer(clip.audio, startAt)
       if (generation !== playGeneration.current) { audio?.stop(); return }
       oscillator.current = audio
       const startedAt = performance.now() + (audio ? 60 : 0)
@@ -248,7 +248,7 @@ export default function App() {
           <div className="eyebrow"><span className="eyebrow-square" /> MADE FOR THE 128 × 64 WORLD <span className="eyebrow-line" /></div>
           <h1>すべての瞬間を、<br /><em>ポケットサイズ</em>に。</h1>
           <p>動画と音声を、Flipper Zeroの小さな液晶とブザーへ。<br className="desktop-break" />変換から再生シミュレーションまで、ブラウザひとつで。</p>
-          <div className="hero-tags"><span><ShieldCheck size={14} /> ファイルは端末内で処理</span><span><Cpu size={14} /> 128×64 モノクロ</span><span><Volume2 size={14} /> 単音ブザー対応</span></div>
+          <div className="hero-tags"><span><ShieldCheck size={14} /> ファイルは端末内で処理</span><span><Cpu size={14} /> 128×64 モノクロ</span><span><Volume2 size={14} /> PCM / 単音ブザー</span></div>
         </div>
         <div className="hero-graphic" aria-hidden="true"><div className="signal-orbit orbit-one" /><div className="signal-orbit orbit-two" /><span className="hero-grid">01011010<br />11000101<br />00110100<br />10101011</span><div className="hero-pixel-card"><div className="hero-pixel-icon">▚</div><span>01 / 64</span></div></div>
       </div>
@@ -281,8 +281,8 @@ export default function App() {
               <QualitySlider label="ちらつき抑制" value={settings.stability} display={`${settings.stability}%`} min={0} max={100} onChange={value => updateSettings('stability', value)} hint="連続フレームの表示を安定化" />
             </div>
             <div className="settings-group-label audio-group"><AudioLines size={15} /> AUDIO <span>ブザー設定</span></div>
-            <ControlSelect label="音の解析モード" value={settings.tone} choices={[{ value: 'melody', label: 'メロディー優先' }, { value: 'voice', label: '声の帯域を優先' }]} onChange={value => updateSettings('tone', value as Settings['tone'])} />
-            <div className="audio-hint"><Waves size={15} /><span>周波数スペクトルから主音を推定。100〜2,500Hzの単音信号に変換します。</span></div>
+            <ControlSelect label="音声変換方式" value={settings.tone} choices={[{ value: 'pcm', label: '高音質 · 音楽・声（推奨）' }, { value: 'melody', label: '単音ブザー · メロディー' }, { value: 'voice', label: '単音ブザー · 声の帯域' }]} onChange={value => updateSettings('tone', value as Settings['tone'])} />
+            <div className="audio-hint"><Waves size={15} /><span>{settings.tone === 'pcm' ? '16kHzの音声波形を補正し、4bit IMA ADPCMで圧縮。楽器・声・リズムを保持します。実機PWM再生は次段階で検証します。' : '音楽を20msごとに単音化します。複数楽器や歌声は音程が飛びやすく、大幅に音質が低下します。'}</span></div>
             {working && <div className="progress-area" role="status"><div className="progress-head"><span>{status}</span><strong>{Math.round(progress * 100)}%</strong></div><div className="progress-track"><div style={{ width: `${progress * 100}%` }} /></div></div>}
             {error && <div className="error-box" role="alert"><CircleAlert size={16} />{error}</div>}
             <button className={`convert-button ${working ? 'converting' : ''}`} onClick={() => { if (working) abortController.current?.abort(); else void convert() }} disabled={!file && !working}>
@@ -305,19 +305,19 @@ export default function App() {
               </div>
             </div>
 
-            <div className="transport"><div className="transport-top"><div className="transport-name"><MonitorPlay size={16} /> CONVERTED PLAYBACK <span>映像・ブザー同期</span></div><span className="transport-time">{formatTime(position)} <span>/</span> {formatTime(duration)}</span></div>
+            <div className="transport"><div className="transport-top"><div className="transport-name"><MonitorPlay size={16} /> CONVERTED PLAYBACK <span>映像・音声同期</span></div><span className="transport-time">{formatTime(position)} <span>/</span> {formatTime(duration)}</span></div>
               <div className="transport-bottom"><button className="play-button" disabled={!clip} aria-label={playing ? '一時停止' : '再生'} onClick={() => void togglePlayback()}>{playing ? <Pause size={19} fill="currentColor" /> : <Play size={19} fill="currentColor" />}</button><input type="range" className="timeline" aria-label="再生位置" disabled={!clip} min={0} max={Math.max(0.01, duration)} step={0.02} value={position} onChange={event => { stop(); setPosition(Number(event.target.value)) }} style={{ '--seek-progress': `${duration ? position / duration * 100 : 0}%` } as React.CSSProperties} /><button className="replay-button" aria-label="先頭に戻る" disabled={!clip} onClick={() => { stop(); setPosition(0) }}><RotateCcw size={18} /></button></div>
-              <div className="transport-wave"><MiniWave audio={clip?.audio || []} /><div className="transport-footnote"><Volume2 size={14} /> {clip && !clip.audio.some(tick => tick.frequency && tick.gain) ? 'この変換結果に再生可能なブザー音声はありません。元の動画から再変換してください。' : 'スマホでは再生ボタンを押して音声を有効にしてください'}</div></div>
+              <div className="transport-wave"><MiniWave audio={clip?.audio || []} pcm={clip?.pcm} /><div className="transport-footnote"><Volume2 size={14} /> {clip && !clip.pcm && !clip.audio.some(tick => tick.frequency && tick.gain) ? 'この変換結果に再生可能な音声はありません。元の動画から再変換してください。' : 'スマホでは再生ボタンを押して音声を有効にしてください'}</div></div>
             </div>
           </div>
 
-          <div className="panel export-panel"><div className="export-content"><div className="export-icon"><HardDrive size={22} /></div><div className="export-copy"><span className="export-eyebrow">OUTPUT FILE / .FZMV</span><h3>{clip ? '変換が完了しました' : '書き出しの準備ができています'}</h3><p>{clip ? `${clip.frames.length}フレーム · ${clip.audio.length}音声ステップ · ${niceBytes(result!.binary.length)}` : '変換するとFlipper Zero向け独自ファイルをダウンロードできます。'}</p></div></div><button className="download-button" disabled={!clip} onClick={save}><ArrowDownToLine size={18} /> ダウンロード</button></div>
+          <div className="panel export-panel"><div className="export-content"><div className="export-icon"><HardDrive size={22} /></div><div className="export-copy"><span className="export-eyebrow">OUTPUT FILE / .FZMV</span><h3>{clip ? '変換が完了しました' : '書き出しの準備ができています'}</h3><p>{clip ? `${clip.frames.length}フレーム · ${clip.pcm ? '16kHz ADPCM音声' : `${clip.audio.length}単音ステップ`} · ${niceBytes(result!.binary.length)}` : '変換するとFlipper Zero向け独自ファイルをダウンロードできます。'}</p></div></div><button className="download-button" disabled={!clip} onClick={save}><ArrowDownToLine size={18} /> ダウンロード</button></div>
           {result?.warnings.map((warning, i) => <div className="notice notice-warn" key={i}><CircleAlert size={16} /> {warning}</div>)}
-          <div className="spec-grid"><div className="spec"><span className="spec-icon"><MonitorPlay size={18} /></span><span>DISPLAY</span><strong>128 × 64</strong><small>MONOCHROME LCD</small></div><div className="spec"><span className="spec-icon"><Activity size={18} /></span><span>AUDIO</span><strong>100–2500 <i>Hz</i></strong><small>PIEZO BUZZER</small></div><div className="spec"><span className="spec-icon"><Clock3 size={18} /></span><span>FRAME RATE</span><strong>{settings.fps} <i>FPS</i></strong><small>CONFIGURABLE</small></div></div>
+          <div className="spec-grid"><div className="spec"><span className="spec-icon"><MonitorPlay size={18} /></span><span>DISPLAY</span><strong>128 × 64</strong><small>MONOCHROME LCD</small></div><div className="spec"><span className="spec-icon"><Activity size={18} /></span><span>AUDIO</span><strong>{settings.tone === 'pcm' ? '16k' : '100–2500'} <i>Hz</i></strong><small>{settings.tone === 'pcm' ? '4-BIT IMA ADPCM' : 'SINGLE TONE'}</small></div><div className="spec"><span className="spec-icon"><Clock3 size={18} /></span><span>FRAME RATE</span><strong>{settings.fps} <i>FPS</i></strong><small>CONFIGURABLE</small></div></div>
         </section>
       </div>
 
-      <div className="bottom-info"><span className="info-icon"><Sparkles size={19} /></span><div><strong>実機再生に向けたプロトタイプ形式</strong><p>FZMV v1は将来の実機プレーヤー用に設計した独自形式です。現時点でFlipper Zero本体の再生アプリは未実装です。60 FPSでの変換・ブラウザ再生には対応していますが、実機で60 FPSを維持できるかは未検証です。LCDの色調とブザーの音色はブラウザによる近似であり、音声は単音に制限されます。</p></div></div>
+      <div className="bottom-info"><span className="info-icon"><Sparkles size={19} /></span><div><strong>実機再生に向けたプロトタイプ形式</strong><p>高音質モードはFZMV v2（16kHz・4bit ADPCM音声）を生成します。既存の単音モードはv1形式です。Flipper ZeroにはPCM再生アプリの実装例がありますが、今回の独自形式を再生する実機アプリは未実装です。ブラウザの音は圧電ブザーの帯域を近似したもので、実機の音量や音質、60 FPSとの同時動作は未検証です。</p></div></div>
     </main>
     <footer className="footer"><span className="footer-brand">FLIPFRAME<span> / STUDIO</span></span><span>ENGINE V1.0 <span className="footer-dot">◆</span> LOCAL MEDIA CONVERSION</span><span>BUILT FOR THE TINIEST SCREEN.</span></footer>
   </div>

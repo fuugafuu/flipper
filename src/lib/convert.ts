@@ -1,6 +1,7 @@
 import { decodeClip, encodeClip, type FlipperClip, type BuzzerTick } from './format'
 import { audioArtwork, convertImage, renderSource, type Settings } from './vision'
 import { decodeAudio, trackBuzzer } from './sound'
+import { pcmWaveform, preparePcm, type PcmAudio } from './pcm'
 
 export type ConversionResult = {
   clip: FlipperClip
@@ -67,14 +68,21 @@ export async function convertMedia(
 
     onProgress(0.03, '音声トラックを解析しています')
     let audio: BuzzerTick[] = []
+    let pcm: PcmAudio | undefined
     let audioDuration = 0
     try {
       const buffer = await decodeAudio(file, message => onProgress(0.07, message))
       audioDuration = buffer.duration
       if (!video) sourceDuration = buffer.duration
-      audio = await trackBuzzer(buffer, Math.min(sourceDuration, audioDuration), settings, progress => {
-        onProgress(0.1 + progress * 0.32, 'スペクトル解析 · ブザー信号を最適化中')
-      }, signal)
+      if (settings.tone === 'pcm') {
+        pcm = await preparePcm(buffer, Math.min(sourceDuration, audioDuration), progress => {
+          onProgress(0.1 + progress * 0.32, '音楽・音声の波形を最適化中 · ADPCM圧縮')
+        }, signal)
+      } else {
+        audio = await trackBuzzer(buffer, Math.min(sourceDuration, audioDuration), settings, progress => {
+          onProgress(0.1 + progress * 0.32, 'スペクトル解析 · ブザー信号を最適化中')
+        }, signal)
+      }
     } catch (error) {
       abortIfNeeded(signal)
       if (!video) throw error
@@ -92,6 +100,7 @@ export async function convertMedia(
     const count = Math.max(1, Math.ceil(duration * settings.fps))
     let previous: Uint8Array | undefined
     const toneState = {}
+    const audioLevels = pcm ? pcmWaveform(pcm, Math.max(1, count)) : undefined
 
     for (let i = 0; i < count; i++) {
       abortIfNeeded(signal)
@@ -102,7 +111,7 @@ export async function convertMedia(
         region = renderSource(context, video, video.videoWidth, video.videoHeight, settings.fit)
       } else {
         const tick = audio[Math.min(audio.length - 1, Math.floor(seconds * 1000 / 20))]
-        audioArtwork(context, count <= 1 ? 0 : i / (count - 1), tick ? tick.gain / 255 : 0)
+        audioArtwork(context, count <= 1 ? 0 : i / (count - 1), audioLevels ? audioLevels[i] / 255 : tick ? tick.gain / 255 : 0)
       }
       const frame = convertImage(context.getImageData(0, 0, 128, 64), settings, previous, region, toneState)
       frames.push(frame)
@@ -113,9 +122,9 @@ export async function convertMedia(
       }
     }
 
-    if (audioDuration > 0 && audio.length === 0) warnings.push('音声の変換結果は空でした。')
+    if (audioDuration > 0 && audio.length === 0 && !pcm) warnings.push('音声の変換結果は空でした。')
     onProgress(0.98, 'FZMVコンテナを書き出しています')
-    const original: FlipperClip = { fps: settings.fps, durationMs: Math.round(duration * 1000), frames, audio }
+    const original: FlipperClip = { fps: settings.fps, durationMs: Math.round(duration * 1000), frames, audio, ...(pcm ? { pcm } : {}) }
     const binary = encodeClip(original)
     // The preview decodes the exported bytes, exactly as a future player should.
     const clip = decodeClip(binary)

@@ -8,7 +8,7 @@ export type Settings = {
   detail: number
   stability: number
   fit: 'contain' | 'cover'
-  tone: 'melody' | 'voice'
+  tone: 'pcm' | 'melody' | 'voice'
 }
 
 export type ImageRegion = { left: number; top: number; right: number; bottom: number }

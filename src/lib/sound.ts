@@ -1,6 +1,7 @@
 import type { BuzzerTick } from './format'
 import { AUDIO_TICK_MS } from './format'
 import type { Settings } from './vision'
+import { decodeAdpcm, type PcmAudio } from './pcm'
 
 const SAMPLE_RATE = 8000
 const FFT_SIZE = 1024
@@ -177,7 +178,7 @@ export async function decodeAudio(file: File, notify: (text: string) => void): P
       wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
     })
     await ffmpeg.writeFile(input, await fetchFile(file))
-    const code = await ffmpeg.exec(['-i', input, '-vn', '-ac', '1', '-ar', String(SAMPLE_RATE), 'audio.wav'])
+    const code = await ffmpeg.exec(['-i', input, '-vn', '-ac', '1', '-ar', '16000', 'audio.wav'])
     if (code !== 0) throw new Error('音声トラックを抽出できませんでした')
     const output = await ffmpeg.readFile('audio.wav')
     if (typeof output === 'string') throw new Error('音声データを読み取れませんでした')
@@ -190,6 +191,38 @@ export async function decodeAudio(file: File, notify: (text: string) => void): P
 }
 
 export type PlaybackHandle = { context: AudioContext; start: number; stop: () => void }
+
+const pcmCache = new WeakMap<Uint8Array, Float32Array>()
+
+export function playPcm(pcm: PcmAudio, offsetSeconds: number): PlaybackHandle {
+  const context = new AudioContext()
+  void context.resume().catch(() => { /* The UI detects a suspended context. */ })
+  let samples = pcmCache.get(pcm.data)
+  if (!samples) {
+    const decoded = decodeAdpcm(pcm)
+    samples = Float32Array.from(decoded, sample => sample / 32768)
+    pcmCache.set(pcm.data, samples)
+  }
+  const buffer = context.createBuffer(1, samples.length, pcm.sampleRate)
+  buffer.copyToChannel(samples, 0)
+  const source = context.createBufferSource()
+  source.buffer = buffer
+  const highpass = context.createBiquadFilter()
+  highpass.type = 'highpass'
+  highpass.frequency.value = 300
+  const lowpass = context.createBiquadFilter()
+  lowpass.type = 'lowpass'
+  lowpass.frequency.value = 4600
+  const gain = context.createGain()
+  gain.gain.value = 0.7
+  source.connect(highpass).connect(lowpass).connect(gain).connect(context.destination)
+  const start = context.currentTime + 0.06
+  source.start(start, Math.min(offsetSeconds, Math.max(0, buffer.duration - 0.005)))
+  return {
+    context, start,
+    stop: () => { try { source.stop() } catch { /* already stopped */ } void context.close() },
+  }
+}
 
 export function playBuzzer(ticks: BuzzerTick[], offsetSeconds: number): PlaybackHandle {
   const context = new AudioContext()
