@@ -133,8 +133,12 @@ bool fzmv_frame_at(
     if(index == previous_index) return true;
 
     uint32_t first = index;
-    if(previous_index != UINT32_MAX && previous_index + 1u == index) {
-        first = index;
+    if(previous_index != UINT32_MAX && previous_index < index &&
+       index - previous_index <= info->fps * 2u) {
+        /* Reuse the already decoded frame when display updates skip frames.
+         * Previously even a one-frame skip forced a two-second keyframe search
+         * and replayed the entire delta chain from the SD card. */
+        first = previous_index + 1u;
     } else {
         /* At most two seconds of frames between keyframes in the web encoder. */
         const uint32_t limit = info->fps * 2u + 1u;
@@ -164,7 +168,8 @@ bool fzmv_frame_at(
             return false;
         }
         if(delta) {
-            if(current == first && (previous_index == UINT32_MAX || previous_index + 1u != first)) {
+            if(current == first && (previous_index == UINT32_MAX ||
+                                    previous_index + 1u != first)) {
                 *error = "Delta frame without reference";
                 return false;
             }

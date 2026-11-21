@@ -8,6 +8,8 @@
 /* 64 MHz timer -> 125 kHz PWM carrier, 16 kHz update DMA clock. */
 #define PWM_TIMER TIM16
 #define SAMPLE_TIMER TIM2
+#define DMA_HALF_SAMPLES 1024u
+#define DMA_TOTAL_SAMPLES (DMA_HALF_SAMPLES * 2u)
 
 static void audio_irq(void* context) {
     AudioPwm* audio = context;
@@ -25,12 +27,12 @@ static void audio_irq(void* context) {
 }
 
 static void fill_half(AudioPwm* audio, File* file, const FzmvInfo* info, uint32_t half) {
-    const uint32_t sample_offset = audio->first_sample + half * 256u;
-    const uint32_t dst_offset = (half & 1u) * 256u;
+    const uint32_t sample_offset = audio->first_sample + half * DMA_HALF_SAMPLES;
+    const uint32_t dst_offset = (half & 1u) * DMA_HALF_SAMPLES;
     const uint32_t block = sample_offset / 256u;
     const uint32_t skip = sample_offset % 256u;
     uint32_t cached_block = UINT32_MAX;
-    for(uint32_t i = 0; i < 256; i++) {
+    for(uint32_t i = 0; i < DMA_HALF_SAMPLES; i++) {
         uint32_t sample = sample_offset + i;
         int16_t value = 0;
         if(sample < info->sample_count) {
@@ -84,7 +86,7 @@ bool audio_pwm_start(AudioPwm* audio, File* file, const FzmvInfo* info,
 
     LL_DMA_ConfigAddresses(DMA1, LL_DMA_CHANNEL_1, (uint32_t)audio->dma,
                            (uint32_t)&PWM_TIMER->CCR1, LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
-    LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_1, 512);
+    LL_DMA_SetDataLength(DMA1, LL_DMA_CHANNEL_1, DMA_TOTAL_SAMPLES);
     LL_DMA_SetPeriphRequest(DMA1, LL_DMA_CHANNEL_1, LL_DMAMUX_REQ_TIM2_UP);
     LL_DMA_SetDataTransferDirection(DMA1, LL_DMA_CHANNEL_1, LL_DMA_DIRECTION_MEMORY_TO_PERIPH);
     LL_DMA_SetChannelPriorityLevel(DMA1, LL_DMA_CHANNEL_1, LL_DMA_PRIORITY_VERYHIGH);
@@ -109,7 +111,9 @@ bool audio_pwm_start(AudioPwm* audio, File* file, const FzmvInfo* info,
 
 void audio_pwm_refill(AudioPwm* audio, File* file, const FzmvInfo* info) {
     if(!audio->running) return;
-    while(audio->prepared_halves < audio->completed_halves + 2u) {
+    /* One refill per call. A delayed storage operation must never trap the
+     * main playback loop while DMA continues advancing in the background. */
+    if(audio->prepared_halves < audio->completed_halves + 2u) {
         /* A missed refill must not overwrite the half currently being played. */
         if(audio->prepared_halves < audio->completed_halves + 1u) {
             audio->underruns++;
@@ -123,8 +127,8 @@ void audio_pwm_refill(AudioPwm* audio, File* file, const FzmvInfo* info) {
 uint32_t audio_pwm_position(const AudioPwm* audio) {
     uint32_t completed = audio->completed_halves;
     uint32_t remaining = LL_DMA_GetDataLength(DMA1, LL_DMA_CHANNEL_1);
-    uint32_t progress = (512u - remaining) % 256u;
-    return audio->first_sample + completed * 256u + progress;
+    uint32_t progress = (DMA_TOTAL_SAMPLES - remaining) % DMA_HALF_SAMPLES;
+    return audio->first_sample + completed * DMA_HALF_SAMPLES + progress;
 }
 
 void audio_pwm_stop(AudioPwm* audio) {

@@ -7,7 +7,8 @@
 
 /* The caller exclusively owns the speaker and DMA1 channel 1 while running. */
 typedef struct {
-    uint16_t dma[512];
+    /* Two 64 ms DMA halves keep SD-card video reads from starving audio. */
+    uint16_t dma[2048];
     int16_t decoded[256];
     volatile uint32_t completed_halves;
     volatile uint32_t underruns;
