@@ -101,12 +101,12 @@ export async function convertMedia(
     let toneState = {}
     const audioLevels = pcm ? pcmWaveform(pcm, Math.max(1, count)) : undefined
 
-    const storeFrame = async (i: number, image: ImageData, region?: ReturnType<typeof renderSource>) => {
+    const storeFrame = async (i: number, image: ImageData | Uint8Array, region?: ReturnType<typeof renderSource>) => {
       abortIfNeeded(signal)
       const frame = convertImage(image, settings, previous, region, toneState)
       frames.push(frame)
       previous = frame
-      if (i % 12 === 0 || i === count - 1) {
+      if (i % 48 === 0 || i === count - 1) {
         onProgress(0.43 + ((i + 1) / count) * 0.54, `フレームを最適化中 · ${i + 1} / ${count}`)
         await new Promise(resolve => setTimeout(resolve, 0))
       }

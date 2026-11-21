@@ -73,4 +73,22 @@ describe('1-bit image conversion', () => {
       }
     }
   })
+
+  it('produces identical frames regardless of the previously encoded picture', () => {
+    const current = makeImage(x => x >= 48 && x < 78 ? 175 : 76)
+    const older = convertImage(makeImage(x => x >= 15 && x < 45 ? 175 : 76), settings)
+    for (const dither of ['bayer', 'floyd', 'atkinson'] as const) {
+      const options = { ...settings, stability: 100, dither }
+      expect(convertImage(current, options, older)).toEqual(convertImage(current, options))
+    }
+  })
+
+  it('converts raw grayscale frames identically to RGBA frames', () => {
+    const image = makeImage((x, y) => (x * 3 + y * 5) % 256)
+    const gray = new Uint8Array(WIDTH * HEIGHT)
+    for (let i = 0; i < gray.length; i++) gray[i] = image.data[i * 4]
+    expect(convertImage(gray, { ...settings, stability: 85, detail: 40 })).toEqual(
+      convertImage(image, { ...settings, stability: 85, detail: 40 }),
+    )
+  })
 })

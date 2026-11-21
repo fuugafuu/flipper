@@ -159,13 +159,13 @@ export async function trackBuzzer(buffer: AudioBuffer, seconds: number, settings
 }
 
 export async function decodeAudio(file: File, notify: (text: string) => void): Promise<AudioBuffer> {
-  if (file.type.startsWith('audio/') || /\.(wav|mp3|m4a|ogg|aac|flac)$/i.test(file.name)) {
-    try {
-      const context = new AudioContext()
-      try { return await context.decodeAudioData(await file.arrayBuffer()) }
-      finally { void context.close() }
-    } catch { /* FFmpeg fallback for unsupported codecs. */ }
-  }
+  // Browsers can often decode MP4 audio directly. Avoid loading the full
+  // FFmpeg WASM runtime a second time when the native decoder supports it.
+  try {
+    const context = new AudioContext()
+    try { return await context.decodeAudioData(await file.arrayBuffer()) }
+    finally { void context.close() }
+  } catch { /* FFmpeg fallback for unsupported codecs or video containers. */ }
 
   notify('音声トラックを分離中 · FFmpegエンジンを読み込みます')
   const [{ FFmpeg }, { fetchFile, toBlobURL }] = await Promise.all([

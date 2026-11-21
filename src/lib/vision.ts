@@ -13,7 +13,7 @@ export type Settings = {
 }
 
 export type ImageRegion = { left: number; top: number; right: number; bottom: number }
-export type ToneState = { gain?: number; black?: number; previousLuminance?: Float32Array }
+export type ToneState = { gain?: number; black?: number }
 
 const bayer = [
   0, 32, 8, 40, 48, 16, 56, 24,
@@ -47,7 +47,7 @@ export function renderSource(context: CanvasRenderingContext2D, source: CanvasIm
   }
 }
 
-export function convertImage(image: ImageData, settings: Settings, previous?: Uint8Array, region?: ImageRegion, toneState?: ToneState): Uint8Array {
+export function convertImage(image: ImageData | Uint8Array, settings: Settings, _previous?: Uint8Array, region?: ImageRegion, toneState?: ToneState): Uint8Array {
   const pixels = WIDTH * HEIGHT
   const lum = new Float32Array(pixels)
   const histogram = new Uint32Array(256)
@@ -55,8 +55,9 @@ export function convertImage(image: ImageData, settings: Settings, previous?: Ui
   let activePixels = 0
   for (let i = 0; i < pixels; i++) {
     const offset = i * 4
-    const r = image.data[offset], g = image.data[offset + 1], b = image.data[offset + 2]
-    const value = r * 0.2126 + g * 0.7152 + b * 0.0722
+    const value = image instanceof Uint8Array
+      ? image[i]
+      : image.data[offset] * 0.2126 + image.data[offset + 1] * 0.7152 + image.data[offset + 2] * 0.0722
     lum[i] = value
     const x = i % WIDTH, y = Math.floor(i / WIDTH)
     if (x >= activeRegion.left && x < activeRegion.right && y >= activeRegion.top && y < activeRegion.bottom) {
@@ -113,35 +114,23 @@ export function convertImage(image: ImageData, settings: Settings, previous?: Ui
     }
   }
 
-  const output = new Uint8Array(FRAME_BYTES)
-  const keepThreshold = settings.stability / 100 * 26
-  // Stabilize static areas only. Holding pixels across moving edges creates
-  // visible trails, especially in high-FPS animation and scene transitions.
-  const previousLuminance = toneState?.previousLuminance
-  const currentLuminance = lum.slice()
-  const moved = previousLuminance && keepThreshold > 0 ? new Uint8Array(pixels) : undefined
-  if (moved && previousLuminance) {
-    for (let y = 0; y < HEIGHT; y++) {
-      for (let x = 0; x < WIDTH; x++) {
+  // Suppress isolated noise within the current frame only. Temporal pixel
+  // retention caused persistent ghosts behind animated objects at 60 FPS.
+  if (settings.stability > 0) {
+    const strength = settings.stability / 100 * 0.24
+    const snapshot = lum.slice()
+    for (let y = 1; y < HEIGHT - 1; y++) {
+      for (let x = 1; x < WIDTH - 1; x++) {
         const p = y * WIDTH + x
-        if (Math.abs(currentLuminance[p] - previousLuminance[p]) < 7) continue
-        // Protect neighboring edge pixels against one-frame motion trails.
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            const nx = x + dx, ny = y + dy
-            if (nx >= 0 && nx < WIDTH && ny >= 0 && ny < HEIGHT) moved[ny * WIDTH + nx] = 1
-          }
-        }
+        const average = (snapshot[p - 1] + snapshot[p + 1] + snapshot[p - WIDTH] + snapshot[p + WIDTH]) / 4
+        if (Math.abs(snapshot[p] - average) < 28) lum[p] = snapshot[p] + (average - snapshot[p]) * strength
       }
     }
   }
-  if (toneState) toneState.previousLuminance = currentLuminance
+  const output = new Uint8Array(FRAME_BYTES)
   const insidePicture = (x: number, y: number) => x >= activeRegion.left && x < activeRegion.right && y >= activeRegion.top && y < activeRegion.bottom
   const setPixel = (pixel: number, on: boolean, threshold: number) => {
     if (!insidePicture(pixel % WIDTH, Math.floor(pixel / WIDTH))) on = true
-    else if (previous && !moved?.[pixel] && Math.abs(lum[pixel] - threshold) < keepThreshold) {
-      on = Boolean(previous[pixel >> 3] & (0x80 >> (pixel & 7)))
-    }
     if (on) output[pixel >> 3] |= 0x80 >> (pixel & 7)
   }
 
