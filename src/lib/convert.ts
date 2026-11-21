@@ -124,7 +124,6 @@ export async function convertMedia(
   } finally {
     video?.pause()
     video?.removeAttribute('src')
-    video?.load()
     if (videoUrl) URL.revokeObjectURL(videoUrl)
   }
 }

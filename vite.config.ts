@@ -5,5 +5,5 @@ export default defineConfig({
   plugins: [react()],
   build: { target: 'es2022' },
   optimizeDeps: { exclude: ['@ffmpeg/ffmpeg', '@ffmpeg/util'] },
-  server: { watch: { ignored: ['**/public/ffmpeg/**'] } },
+  server: { watch: { ignored: ['**/public/ffmpeg/**', '**/.vercel/**', '**/dist/**'] } },
 })
