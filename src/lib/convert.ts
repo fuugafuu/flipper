@@ -51,7 +51,7 @@ export async function convertMedia(
   let videoUrl: string | null = null
   const warnings: string[] = []
   try {
-    let sourceDuration = settings.duration
+    let sourceDuration = 0
     if (video) {
       videoUrl = URL.createObjectURL(file)
       video.preload = 'auto'
@@ -69,21 +69,20 @@ export async function convertMedia(
     let audio: BuzzerTick[] = []
     let audioDuration = 0
     try {
-      const buffer = await decodeAudio(file, settings.duration, message => onProgress(0.07, message))
+      const buffer = await decodeAudio(file, message => onProgress(0.07, message))
       audioDuration = buffer.duration
       if (!video) sourceDuration = buffer.duration
-      const duration = Math.min(sourceDuration, settings.duration)
-      audio = await trackBuzzer(buffer, duration, settings, progress => {
+      audio = await trackBuzzer(buffer, Math.min(sourceDuration, audioDuration), settings, progress => {
         onProgress(0.1 + progress * 0.32, 'スペクトル解析 · ブザー信号を最適化中')
       }, signal)
     } catch (error) {
       abortIfNeeded(signal)
       if (!video) throw error
-      warnings.push('音声トラックを抽出できなかったため、無音の動画として出力しました。音声を含む動画ではFFmpeg WebAssemblyの読み込みに対応したブラウザが必要です。')
+      warnings.push('音声トラックが存在しないか、音声データの読み取りに失敗しました。映像のみ変換しました。')
     }
 
     abortIfNeeded(signal)
-    const duration = Math.min(sourceDuration, settings.duration)
+    const duration = sourceDuration
     const frames: Uint8Array[] = []
     const canvas = document.createElement('canvas')
     canvas.width = 128
@@ -92,18 +91,20 @@ export async function convertMedia(
     if (!context) throw new Error('Canvasを初期化できませんでした')
     const count = Math.max(1, Math.ceil(duration * settings.fps))
     let previous: Uint8Array | undefined
+    const toneState = {}
 
     for (let i = 0; i < count; i++) {
       abortIfNeeded(signal)
       const seconds = i / settings.fps
+      let region
       if (video) {
         await seek(video, Math.min(seconds, Math.max(0, sourceDuration - 0.02)), signal)
-        renderSource(context, video, video.videoWidth, video.videoHeight, settings.fit)
+        region = renderSource(context, video, video.videoWidth, video.videoHeight, settings.fit)
       } else {
         const tick = audio[Math.min(audio.length - 1, Math.floor(seconds * 1000 / 20))]
         audioArtwork(context, count <= 1 ? 0 : i / (count - 1), tick ? tick.gain / 255 : 0)
       }
-      const frame = convertImage(context.getImageData(0, 0, 128, 64), settings, previous)
+      const frame = convertImage(context.getImageData(0, 0, 128, 64), settings, previous, region, toneState)
       frames.push(frame)
       previous = frame
       if (i % 5 === 0 || i === count - 1) {
@@ -112,7 +113,6 @@ export async function convertMedia(
       }
     }
 
-    if (sourceDuration > settings.duration + 0.1) warnings.push(`ファイルの先頭${settings.duration}秒を変換しました。`)
     if (audioDuration > 0 && audio.length === 0) warnings.push('音声の変換結果は空でした。')
     onProgress(0.98, 'FZMVコンテナを書き出しています')
     const original: FlipperClip = { fps: settings.fps, durationMs: Math.round(duration * 1000), frames, audio }

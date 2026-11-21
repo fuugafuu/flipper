@@ -136,7 +136,7 @@ export async function trackBuzzer(buffer: AudioBuffer, seconds: number, settings
   return ticks
 }
 
-export async function decodeAudio(file: File, seconds: number, notify: (text: string) => void): Promise<AudioBuffer> {
+export async function decodeAudio(file: File, notify: (text: string) => void): Promise<AudioBuffer> {
   if (file.type.startsWith('audio/') || /\.(wav|mp3|m4a|ogg|aac|flac)$/i.test(file.name)) {
     try {
       const context = new AudioContext()
@@ -159,7 +159,7 @@ export async function decodeAudio(file: File, seconds: number, notify: (text: st
       wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
     })
     await ffmpeg.writeFile(input, await fetchFile(file))
-    const code = await ffmpeg.exec(['-i', input, '-vn', '-ac', '1', '-ar', String(SAMPLE_RATE), '-t', String(seconds), 'audio.wav'])
+    const code = await ffmpeg.exec(['-i', input, '-vn', '-ac', '1', '-ar', String(SAMPLE_RATE), 'audio.wav'])
     if (code !== 0) throw new Error('音声トラックを抽出できませんでした')
     const output = await ffmpeg.readFile('audio.wav')
     if (typeof output === 'string') throw new Error('音声データを読み取れませんでした')
@@ -186,16 +186,24 @@ export async function playBuzzer(ticks: BuzzerTick[], offsetSeconds: number): Pr
   oscillator.connect(highpass).connect(lowpass).connect(gain).connect(context.destination)
   const start = context.currentTime + 0.06
   gain.gain.setValueAtTime(0, context.currentTime)
-  const firstTick = Math.floor(offsetSeconds * 1000 / AUDIO_TICK_MS)
-  for (let i = firstTick; i < ticks.length; i++) {
-    const tick = ticks[i]
-    const time = Math.max(start, start + i * AUDIO_TICK_MS / 1000 - offsetSeconds)
-    oscillator.frequency.setValueAtTime(Math.max(100, tick.frequency || 440), time)
-    const volume = tick.frequency ? Math.pow(tick.gain / 255, 1.15) * 0.14 : 0
-    gain.gain.setValueAtTime(volume, time)
-    if (tick.gate < 100) gain.gain.setValueAtTime(0, time + AUDIO_TICK_MS / 1000 * tick.gate / 100)
+  // Queue only the next half-second of buzzer events to avoid unbounded Web Audio automation.
+  let nextTick = Math.floor(offsetSeconds * 1000 / AUDIO_TICK_MS)
+  const schedule = () => {
+    const horizon = context.currentTime + 0.5
+    while (nextTick < ticks.length) {
+      const time = Math.max(start, start + nextTick * AUDIO_TICK_MS / 1000 - offsetSeconds)
+      if (time > horizon) break
+      const tick = ticks[nextTick++]
+      oscillator.frequency.setValueAtTime(Math.max(100, tick.frequency || 440), time)
+      const volume = tick.frequency ? Math.pow(tick.gain / 255, 1.15) * 0.14 : 0
+      gain.gain.setValueAtTime(volume, time)
+      if (tick.gate < 100) gain.gain.setValueAtTime(0, time + AUDIO_TICK_MS / 1000 * tick.gate / 100)
+    }
+    if (nextTick >= ticks.length) clearInterval(timer)
   }
+  const timer = window.setInterval(schedule, 100)
+  schedule()
   oscillator.start(start)
   oscillator.stop(start + Math.max(0.02, ticks.length * AUDIO_TICK_MS / 1000 - offsetSeconds) + 0.02)
-  return { context, start, stop: () => { try { oscillator.stop() } catch { /* stopped */ } void context.close() } }
+  return { context, start, stop: () => { clearInterval(timer); try { oscillator.stop() } catch { /* stopped */ } void context.close() } }
 }

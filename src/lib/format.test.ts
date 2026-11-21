@@ -45,4 +45,11 @@ describe('FZMV v1 codec', () => {
     const source: FlipperClip = { frames, fps: 10, durationMs: 4500, audio: [] }
     expect(decodeClip(encodeClip(source))).toEqual(source)
   })
+
+  it('round-trips a full-length 60 FPS clip with keyframe intervals', () => {
+    const frames = Array.from({ length: 241 }, (_, i) =>
+      new Uint8Array(FRAME_BYTES).fill(i % 3 === 0 ? 0xff : i % 3 === 1 ? 0x55 : 0xaa))
+    const source: FlipperClip = { frames, fps: 60, durationMs: 4017, audio: [] }
+    expect(decodeClip(encodeClip(source))).toEqual(source)
+  })
 })

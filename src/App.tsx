@@ -11,7 +11,7 @@ import { playBuzzer, type PlaybackHandle } from './lib/sound'
 import type { Settings } from './lib/vision'
 
 const initialSettings: Settings = {
-  fps: 10, duration: 30, dither: 'atkinson', contrast: 1.2,
+  fps: 10, dither: 'atkinson', contrast: 1.2,
   detail: 40, stability: 40, fit: 'contain', tone: 'melody',
 }
 
@@ -90,7 +90,9 @@ export default function App() {
     if (!file) { setSourceUrl(''); return }
     const url = URL.createObjectURL(file)
     setSourceUrl(url)
-    return () => URL.revokeObjectURL(url)
+    // Media elements can finish their pending range requests after unmount.
+    // Keep the blob alive briefly so those requests are not served a revoked URL.
+    return () => { window.setTimeout(() => URL.revokeObjectURL(url), 5000) }
   }, [file])
 
   useEffect(() => () => {
@@ -118,6 +120,11 @@ export default function App() {
       return
     }
     stop()
+    // Stop outstanding media fetches before releasing the previous source URL.
+    if (sourceMedia.current) {
+      sourceMedia.current.removeAttribute('src')
+      sourceMedia.current.load()
+    }
     abortController.current?.abort()
     setWorking(false)
     setFile(selected)
@@ -191,7 +198,7 @@ export default function App() {
         if (generation !== playGeneration.current) return
         const elapsed = audio ? Math.max(0, audio.context.currentTime - audio.start) : Math.max(0, (performance.now() - startedAt) / 1000)
         const now = Math.min(duration, startAt + elapsed)
-        if (now - lastRendered >= 0.04 || now === duration) { setPosition(now); lastRendered = now }
+        if (Math.floor(now * clip.fps) !== Math.floor(lastRendered * clip.fps) || now === duration) { setPosition(now); lastRendered = now }
         if (now >= duration) { stop(); setPosition(duration); return }
         animation.current = requestAnimationFrame(tick)
       }
@@ -247,15 +254,15 @@ export default function App() {
             <button className={`drop-zone ${dragActive ? 'drag-active' : ''} ${file ? 'has-file' : ''}`} type="button" onClick={() => fileInput.current?.click()} onDragOver={event => { event.preventDefault(); setDragActive(true) }} onDragLeave={() => setDragActive(false)} onDrop={event => { event.preventDefault(); setDragActive(false); chooseFile(event.dataTransfer.files[0]) }}>
               {file ? <><div className="drop-icon selected">{isVideo ? <FileVideo2 size={24} /> : <FileAudio2 size={24} />}</div><strong className="file-name">{file.name}</strong><span className="drop-secondary">{niceBytes(file.size)} <span className="dot-separator">·</span> クリックして変更</span><span className="file-indicator"><Check size={12} /> ファイル選択済み</span></> : <><div className="drop-icon"><UploadCloud size={27} strokeWidth={1.6} /></div><strong>ファイルをドロップ</strong><span className="drop-secondary">またはクリックしてファイルを選択</span><span className="file-types">MP4 / MOV / WEBM / MP3 / WAV / MORE</span></>}
             </button>
-            <div className="upload-footnote"><Info size={14} /> 大きな動画は処理に時間がかかります。短いクリップを推奨。</div>
+            <div className="upload-footnote"><Info size={14} /> 最後まで変換します。長い動画や高FPSは端末のメモリと処理時間が必要です。</div>
           </section>
 
           <section className="panel settings-panel">
             <div className="panel-heading"><div className="panel-heading-left"><span className="step-label">02</span><h3>変換パラメータ</h3></div><SlidersHorizontal size={17} className="dim-icon" /></div>
             <div className="settings-group-label"><Film size={15} /> VIDEO <span>映像設定</span></div>
             <div className="settings-selects">
-              <ControlSelect label="フレームレート" value={settings.fps} choices={[6, 8, 10, 12].map(value => ({ value, label: `${value} FPS` }))} onChange={value => updateSettings('fps', Number(value))} />
-              <ControlSelect label="最大変換時間" value={settings.duration} choices={[15, 30, 60, 120, 180].map(value => ({ value, label: `${value} 秒` }))} onChange={value => updateSettings('duration', Number(value))} />
+              <ControlSelect label="フレームレート" value={settings.fps} choices={[6, 8, 10, 12, 15, 20, 24, 30, 40, 48, 60].map(value => ({ value, label: `${value} FPS` }))} onChange={value => updateSettings('fps', Number(value))} />
+              <div className="full-duration-note"><Clock3 size={14} /> ファイルの最後まで変換します</div>
               <ControlSelect label="ディザリング" value={settings.dither} choices={[{ value: 'atkinson', label: 'Atkinson · 輪郭重視' }, { value: 'floyd', label: 'Floyd–Steinberg · 階調' }, { value: 'bayer', label: 'Ordered 8×8 · 安定' }]} onChange={value => updateSettings('dither', value as Settings['dither'])} />
               <ControlSelect label="画面の収め方" value={settings.fit} choices={[{ value: 'contain', label: '全体を表示' }, { value: 'cover', label: '画面いっぱい' }]} onChange={value => updateSettings('fit', value as Settings['fit'])} />
             </div>
@@ -301,7 +308,7 @@ export default function App() {
         </section>
       </div>
 
-      <div className="bottom-info"><span className="info-icon"><Sparkles size={19} /></span><div><strong>実機再生に向けたプロトタイプ形式</strong><p>FZMV v1は将来の実機プレーヤー用に設計した独自形式です。現時点でFlipper Zero本体の再生アプリは未実装です。LCDの色調とブザーの音色はブラウザによる近似であり、音声は単音に制限されるため会話・複雑な楽曲を原音どおりに再現できません。</p></div></div>
+      <div className="bottom-info"><span className="info-icon"><Sparkles size={19} /></span><div><strong>実機再生に向けたプロトタイプ形式</strong><p>FZMV v1は将来の実機プレーヤー用に設計した独自形式です。現時点でFlipper Zero本体の再生アプリは未実装です。60 FPSでの変換・ブラウザ再生には対応していますが、実機で60 FPSを維持できるかは未検証です。LCDの色調とブザーの音色はブラウザによる近似であり、音声は単音に制限されます。</p></div></div>
     </main>
     <footer className="footer"><span className="footer-brand">FLIPFRAME<span> / STUDIO</span></span><span>ENGINE V1.0 <span className="footer-dot">◆</span> LOCAL MEDIA CONVERSION</span><span>BUILT FOR THE TINIEST SCREEN.</span></footer>
   </div>

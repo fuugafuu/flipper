@@ -58,7 +58,8 @@ function rleDecode(source: Uint8Array): Uint8Array {
 }
 
 export function encodeClip(clip: FlipperClip): Uint8Array {
-  if (!Number.isInteger(clip.fps) || clip.fps < 1 || clip.fps > 30 || clip.frames.length < 1) {
+  if (!Number.isInteger(clip.fps) || clip.fps < 1 || clip.fps > 60 || clip.frames.length < 1 ||
+    !Number.isSafeInteger(clip.durationMs) || clip.durationMs < 0 || clip.durationMs > 0xffffffff) {
     throw new Error('FPSまたはフレーム数が不正です')
   }
   const records: Uint8Array[] = []
@@ -84,6 +85,7 @@ export function encodeClip(clip: FlipperClip): Uint8Array {
   const frameIndexOffset = 64
   const frameDataOffset = frameIndexOffset + clip.frames.length * 4
   const audioOffset = frameDataOffset + records.reduce((size, record) => size + record.length, 0)
+  if (audioOffset + clip.audio.length * 4 > 0xffffffff) throw new Error('変換データがFZMV形式の4GB上限を超えています')
   const file = new Uint8Array(audioOffset + clip.audio.length * 4)
   const view = new DataView(file.buffer)
   file.set([0x46, 0x5a, 0x4d, 0x56]) // FZMV
@@ -131,7 +133,7 @@ export function decodeClip(bytes: Uint8Array): FlipperClip {
   const dataOffset = view.getUint32(28, true)
   const audioOffset = view.getUint32(32, true)
   const durationMs = view.getUint32(36, true)
-  if (fps === 0 || frameCount === 0 || indexOffset < 64 || dataOffset < indexOffset + frameCount * 4 ||
+  if (fps === 0 || fps > 60 || frameCount === 0 || indexOffset < 64 || dataOffset < indexOffset + frameCount * 4 ||
     audioOffset < dataOffset || audioOffset + audioCount * 4 !== bytes.length) throw new Error('FZMVのオフセットが不正です')
   const frames: Uint8Array[] = []
   let previous: Uint8Array | null = null
