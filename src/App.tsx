@@ -76,6 +76,7 @@ export default function App() {
   const oscillator = useRef<PlaybackHandle | null>(null)
   const animation = useRef<number>(0)
   const playGeneration = useRef(0)
+  const lastPreviewUpdate = useRef(0)
 
   const isVideo = Boolean(file && (file.type.startsWith('video/') || /\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(file.name)))
   const clip = result?.clip
@@ -106,15 +107,19 @@ export default function App() {
     oscillator.current?.stop()
   }, [])
 
-  useEffect(() => {
+  const drawConvertedFrame = useCallback((seconds: number) => {
     const canvas = previewCanvas.current
     if (!canvas || !clip) return
     const context = canvas.getContext('2d')
     if (!context) return
-    const index = Math.max(0, Math.min(clip.frames.length - 1, Math.floor(position * clip.fps)))
+    const index = Math.max(0, Math.min(clip.frames.length - 1, Math.floor(seconds * clip.fps + 0.000001)))
     const pixels = context.createImageData(128, 64)
     context.putImageData(frameToImageData(clip.frames[index], pixels), 0, 0)
-  }, [clip, position])
+  }, [clip])
+
+  useEffect(() => {
+    drawConvertedFrame(position)
+  }, [drawConvertedFrame, position])
 
   const chooseFile = (selected?: File) => {
     if (!selected) return
@@ -224,12 +229,23 @@ export default function App() {
           }
         }, 900)
       }
-      let lastRendered = -1
+      let lastRenderedFrame = -1
       const tick = () => {
         if (generation !== playGeneration.current) return
         const elapsed = audio ? Math.max(0, audio.context.currentTime - audio.start) : Math.max(0, (performance.now() - startedAt) / 1000)
         const now = Math.min(duration, startAt + elapsed)
-        if (Math.floor(now * clip.fps) !== Math.floor(lastRendered * clip.fps) || now === duration) { setPosition(now); lastRendered = now }
+        const currentFrame = Math.min(clip.frames.length - 1, Math.floor(now * clip.fps + 0.000001))
+        // Draw directly on each display refresh. React may batch state updates at
+        // high FPS, so using state as the frame clock can produce visible stutter.
+        if (currentFrame !== lastRenderedFrame) {
+          drawConvertedFrame(now)
+          lastRenderedFrame = currentFrame
+        }
+        // The timeline and timestamp do not need 60 React renders per second.
+        if (performance.now() - lastPreviewUpdate.current >= 100) {
+          lastPreviewUpdate.current = performance.now()
+          setPosition(now)
+        }
         if (now >= duration) { stop(); setPosition(duration); return }
         animation.current = requestAnimationFrame(tick)
       }
