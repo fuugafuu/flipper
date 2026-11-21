@@ -1,0 +1,130 @@
+import { decodeClip, encodeClip, type FlipperClip, type BuzzerTick } from './format'
+import { audioArtwork, convertImage, renderSource, type Settings } from './vision'
+import { decodeAudio, trackBuzzer } from './sound'
+
+export type ConversionResult = {
+  clip: FlipperClip
+  binary: Uint8Array
+  warnings: string[]
+  sourceDuration: number
+}
+
+function abortIfNeeded(signal: AbortSignal) {
+  if (signal.aborted) throw new DOMException('変換を中止しました', 'AbortError')
+}
+
+async function waitForVideo(video: HTMLVideoElement, event: string, timeoutMs = 20000) {
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => { cleanup(); reject(new Error('動画を読み込めませんでした。形式を確認してください。')) }, timeoutMs)
+    const ok = () => { cleanup(); resolve() }
+    const fail = () => { cleanup(); reject(new Error('この動画形式はブラウザで再生できません。')) }
+    const cleanup = () => {
+      clearTimeout(timeout)
+      video.removeEventListener(event, ok)
+      video.removeEventListener('error', fail)
+    }
+    video.addEventListener(event, ok, { once: true })
+    video.addEventListener('error', fail, { once: true })
+  })
+}
+
+async function seek(video: HTMLVideoElement, seconds: number, signal: AbortSignal) {
+  abortIfNeeded(signal)
+  if (Math.abs(video.currentTime - seconds) > 0.002) {
+    const seeked = waitForVideo(video, 'seeked', 15000)
+    video.currentTime = seconds
+    await seeked
+  }
+  // Allow the browser to present the decoded image before canvas capture.
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  abortIfNeeded(signal)
+}
+
+export async function convertMedia(
+  file: File,
+  settings: Settings,
+  signal: AbortSignal,
+  onProgress: (progress: number, message: string) => void,
+): Promise<ConversionResult> {
+  const videoFile = file.type.startsWith('video/') || /\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(file.name)
+  const video = videoFile ? document.createElement('video') : null
+  let videoUrl: string | null = null
+  const warnings: string[] = []
+  try {
+    let sourceDuration = settings.duration
+    if (video) {
+      videoUrl = URL.createObjectURL(file)
+      video.preload = 'auto'
+      video.muted = true
+      video.playsInline = true
+      video.src = videoUrl
+      video.load()
+      if (video.readyState < 1) await waitForVideo(video, 'loadedmetadata')
+      if (!Number.isFinite(video.duration) || video.duration <= 0) throw new Error('動画の長さを取得できませんでした')
+      sourceDuration = video.duration
+      if (video.readyState < 2) await waitForVideo(video, 'loadeddata')
+    }
+
+    onProgress(0.03, '音声トラックを解析しています')
+    let audio: BuzzerTick[] = []
+    let audioDuration = 0
+    try {
+      const buffer = await decodeAudio(file, settings.duration, message => onProgress(0.07, message))
+      audioDuration = buffer.duration
+      if (!video) sourceDuration = buffer.duration
+      const duration = Math.min(sourceDuration, settings.duration)
+      audio = await trackBuzzer(buffer, duration, settings, progress => {
+        onProgress(0.1 + progress * 0.32, 'スペクトル解析 · ブザー信号を最適化中')
+      }, signal)
+    } catch (error) {
+      abortIfNeeded(signal)
+      if (!video) throw error
+      warnings.push('音声トラックを抽出できなかったため、無音の動画として出力しました。音声を含む動画ではFFmpeg WebAssemblyの読み込みに対応したブラウザが必要です。')
+    }
+
+    abortIfNeeded(signal)
+    const duration = Math.min(sourceDuration, settings.duration)
+    const frames: Uint8Array[] = []
+    const canvas = document.createElement('canvas')
+    canvas.width = 128
+    canvas.height = 64
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    if (!context) throw new Error('Canvasを初期化できませんでした')
+    const count = Math.max(1, Math.ceil(duration * settings.fps))
+    let previous: Uint8Array | undefined
+
+    for (let i = 0; i < count; i++) {
+      abortIfNeeded(signal)
+      const seconds = i / settings.fps
+      if (video) {
+        await seek(video, Math.min(seconds, Math.max(0, sourceDuration - 0.02)), signal)
+        renderSource(context, video, video.videoWidth, video.videoHeight, settings.fit)
+      } else {
+        const tick = audio[Math.min(audio.length - 1, Math.floor(seconds * 1000 / 20))]
+        audioArtwork(context, count <= 1 ? 0 : i / (count - 1), tick ? tick.gain / 255 : 0)
+      }
+      const frame = convertImage(context.getImageData(0, 0, 128, 64), settings, previous)
+      frames.push(frame)
+      previous = frame
+      if (i % 5 === 0 || i === count - 1) {
+        onProgress(0.43 + ((i + 1) / count) * 0.54, `フレームを最適化中 · ${i + 1} / ${count}`)
+        await new Promise(resolve => setTimeout(resolve, 0))
+      }
+    }
+
+    if (sourceDuration > settings.duration + 0.1) warnings.push(`ファイルの先頭${settings.duration}秒を変換しました。`)
+    if (audioDuration > 0 && audio.length === 0) warnings.push('音声の変換結果は空でした。')
+    onProgress(0.98, 'FZMVコンテナを書き出しています')
+    const original: FlipperClip = { fps: settings.fps, durationMs: Math.round(duration * 1000), frames, audio }
+    const binary = encodeClip(original)
+    // The preview decodes the exported bytes, exactly as a future player should.
+    const clip = decodeClip(binary)
+    onProgress(1, '変換完了')
+    return { clip, binary, warnings, sourceDuration }
+  } finally {
+    video?.pause()
+    video?.removeAttribute('src')
+    video?.load()
+    if (videoUrl) URL.revokeObjectURL(videoUrl)
+  }
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.vercel/
+*.local
+*.log
+.tmp/
+public/ffmpeg/
+*.tsbuildinfo
+
+.vercel
