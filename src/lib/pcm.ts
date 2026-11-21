@@ -122,6 +122,14 @@ function resampleAudio(buffer: AudioBuffer, seconds: number): Float32Array {
   const channels = Array.from({ length: buffer.numberOfChannels }, (_, i) => buffer.getChannelData(i))
   const ratio = buffer.sampleRate / PCM_SAMPLE_RATE
   if (!channels.length) return target
+  if (buffer.sampleRate === PCM_SAMPLE_RATE) {
+    for (let i = 0; i < size; i++) {
+      let mixed = 0
+      for (const channel of channels) mixed += channel[i] || 0
+      target[i] = mixed / channels.length
+    }
+    return target
+  }
   // 16-tap windowed-sinc low-pass, cutoff scales with the resampling ratio.
   // Video audio has already been resampled by FFmpeg to 16 kHz.
   const radius = Math.ceil(8 * Math.max(1, ratio))
@@ -155,8 +163,8 @@ export async function preparePcm(
 ): Promise<PcmAudio> {
   const samples = resampleAudio(buffer, seconds)
   if (!samples.length) throw new Error('PCM音声が空です')
-  const alpha = Math.exp(-2 * Math.PI * 210 / PCM_SAMPLE_RATE)
-  const lowPass = 1 - Math.exp(-2 * Math.PI * 5400 / PCM_SAMPLE_RATE)
+  const alpha = Math.exp(-2 * Math.PI * 155 / PCM_SAMPLE_RATE)
+  const lowPass = 1 - Math.exp(-2 * Math.PI * 4500 / PCM_SAMPLE_RATE)
   let priorIn = 0
   let priorHigh = 0
   let priorHigh2 = 0
@@ -179,11 +187,18 @@ export async function preparePcm(
     }
   }
   const rms = Math.sqrt(rmsSum / samples.length)
-  const normalize = rms > 0.0001 ? Math.min(9, 0.28 / rms) : 1
+  const normalize = rms > 0.0001 ? Math.min(10, 0.29 / rms) : 1
   const output = new Int16Array(samples.length)
+  // Fast attack preserves transients, while slower release reduces pumping.
+  const attack = 1 - Math.exp(-1 / (0.008 * PCM_SAMPLE_RATE))
+  const release = 1 - Math.exp(-1 / (0.24 * PCM_SAMPLE_RATE))
+  let envelope = 0
   for (let i = 0; i < samples.length; i++) {
-    // The soft-knee avoids hard clipping on drum transients.
-    output[i] = Math.round(Math.tanh(samples[i] * normalize * 1.3) * 31000)
+    const sample = samples[i] * normalize
+    const magnitude = Math.abs(sample)
+    envelope += (magnitude - envelope) * (magnitude > envelope ? attack : release)
+    const compressor = envelope > 0.22 ? Math.pow(0.22 / envelope, 0.42) : 1
+    output[i] = Math.round(Math.tanh(sample * compressor * 1.35) * 31500)
     if (i % 262144 === 0) {
       if (signal.aborted) throw new DOMException('変換を中止しました', 'AbortError')
       onProgress(0.5 + i / samples.length * 0.5)

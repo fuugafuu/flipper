@@ -46,11 +46,12 @@ static void fill_half(AudioPwm* audio, File* file, const FzmvInfo* info, uint32_
             }
             value = audio->decoded[(skip + i) % 256u];
         }
-        /* Compress dynamic range for the low-efficiency piezo speaker.
-         * The bounded transfer curve avoids hard clipping at full volume. */
-        int32_t scaled = ((int32_t)value * audio->volume) / 100;
-        int32_t magnitude = scaled < 0 ? -scaled : scaled;
-        int32_t pwm = 128 + scaled * 124 / (magnitude + 7000);
+        /* The piezo needs substantial PWM swing even for quiet recordings.
+         * Apply volume after the soft limiter so the volume keys retain a
+         * predictable response. Use 64-bit math to avoid overflow. */
+        int32_t magnitude = value < 0 ? -(int32_t)value : (int32_t)value;
+        int32_t excursion = (int32_t)((int64_t)magnitude * 124 / (magnitude + 2400));
+        int32_t pwm = 128 + (value < 0 ? -excursion : excursion) * audio->volume / 100;
         if(pwm < 2) pwm = 2;
         if(pwm > 253) pwm = 253;
         audio->dma[dst_offset + i] = (uint16_t)pwm;

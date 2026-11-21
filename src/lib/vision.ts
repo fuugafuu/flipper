@@ -78,12 +78,12 @@ export function convertImage(image: ImageData | Uint8Array, settings: Settings, 
     }
     return 255
   }
-  const low = percentile(0.02)
-  const high = percentile(0.98)
+  const low = percentile(0.01)
+  const high = percentile(0.99)
   const usefulRange = high - low
   const desiredBlack = usefulRange > 8 && high > 12 ? Math.max(0, low - 4) : 0
   const desiredGain = usefulRange > 8 && high > 12
-    ? Math.max(1, Math.min(6, 222 / Math.max(36, high - desiredBlack)))
+    ? Math.max(1, Math.min(7, 230 / Math.max(32, high - desiredBlack)))
     : 1
   const oldGain = toneState?.gain
   const jump = oldGain !== undefined && (desiredGain / oldGain > 1.65 || oldGain / desiredGain > 1.65)
@@ -98,7 +98,7 @@ export function convertImage(image: ImageData | Uint8Array, settings: Settings, 
       continue
     }
     const normalized = limit((lum[i] - black) * gain) / 255
-    const shadowLift = Math.pow(normalized, 0.9) * 255
+    const shadowLift = Math.pow(normalized, 0.82) * 255
     lum[i] = limit((shadowLift - 127.5) * settings.contrast + 127.5)
   }
 
@@ -109,7 +109,9 @@ export function convertImage(image: ImageData | Uint8Array, settings: Settings, 
       for (let x = 1; x < WIDTH - 1; x++) {
         const p = y * WIDTH + x
         const surround = (snapshot[p - 1] + snapshot[p + 1] + snapshot[p - WIDTH] + snapshot[p + WIDTH]) / 4
-        lum[p] = limit(snapshot[p] + (snapshot[p] - surround) * amount)
+        const difference = snapshot[p] - surround
+        const edge = Math.max(0, Math.min(1, (Math.abs(difference) - 4) / 20))
+        lum[p] = limit(snapshot[p] + difference * amount * edge)
       }
     }
   }
@@ -127,6 +129,28 @@ export function convertImage(image: ImageData | Uint8Array, settings: Settings, 
       }
     }
   }
+  // Integral-image local contrast maintains small details in dark scenes.
+  const integral = new Float32Array((WIDTH + 1) * (HEIGHT + 1))
+  for (let y = 0; y < HEIGHT; y++) {
+    let row = 0
+    for (let x = 0; x < WIDTH; x++) {
+      row += lum[y * WIDTH + x]
+      const p = (y + 1) * (WIDTH + 1) + x + 1
+      integral[p] = row + integral[p - (WIDTH + 1)]
+    }
+  }
+  const localThreshold = (x: number, y: number) => {
+    const left = Math.max(activeRegion.left, x - 2)
+    const right = Math.min(activeRegion.right, x + 3)
+    const top = Math.max(activeRegion.top, y - 2)
+    const bottom = Math.min(activeRegion.bottom, y + 3)
+    if (right <= left || bottom <= top) return 127.5
+    const stride = WIDTH + 1
+    const sum = integral[bottom * stride + right] - integral[top * stride + right] -
+      integral[bottom * stride + left] + integral[top * stride + left]
+    const mean = sum / ((right - left) * (bottom - top))
+    return 127.5 + Math.max(-25, Math.min(25, (mean - 127.5) * 0.28))
+  }
   const output = new Uint8Array(FRAME_BYTES)
   const insidePicture = (x: number, y: number) => x >= activeRegion.left && x < activeRegion.right && y >= activeRegion.top && y < activeRegion.bottom
   const setPixel = (pixel: number, on: boolean, threshold: number) => {
@@ -138,7 +162,7 @@ export function convertImage(image: ImageData | Uint8Array, settings: Settings, 
     for (let y = 0; y < HEIGHT; y++) {
       for (let x = 0; x < WIDTH; x++) {
         const p = y * WIDTH + x
-        const threshold = 127.5 + (bayer[(y & 7) * 8 + (x & 7)] - 31.5) * 2.35
+        const threshold = localThreshold(x, y) + (bayer[(y & 7) * 8 + (x & 7)] - 31.5) * 2.35
         // Flipper LCD uses 1 for an energized (dark) pixel.
         setPixel(p, lum[p] < threshold, threshold)
       }
@@ -151,7 +175,7 @@ export function convertImage(image: ImageData | Uint8Array, settings: Settings, 
   for (let y = 0; y < HEIGHT; y++) {
     for (let x = 0; x < WIDTH; x++) {
       const p = y * WIDTH + x
-      const on = work[p] < 128
+      const on = work[p] < localThreshold(x, y)
       setPixel(p, on, 128)
       const selected = Boolean(output[p >> 3] & (0x80 >> (p & 7)))
       const error = work[p] - (selected ? 0 : 255)

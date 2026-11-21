@@ -218,7 +218,9 @@ static void player_tone(File* file, const FzmvInfo* info, uint32_t ms,
     bool on = tone.frequency >= 20 && tone.frequency <= 2500 &&
               ((ms % 20u) * 100u < (uint32_t)tone.gate * 20u) && tone.gain && volume;
     if(on && (tick != *previous_tick || !*active)) {
-        float level = (float)tone.gain / 255.0f * (float)volume / 100.0f;
+        /* Boost quieter tracked notes without exceeding the HAL duty range. */
+        float normalized = (float)tone.gain / 255.0f;
+        float level = (normalized * (1.55f - 0.55f * normalized)) * (float)volume / 100.0f;
         furi_hal_speaker_start((float)tone.frequency, level);
         *active = true;
     } else if(!on && *active) {
